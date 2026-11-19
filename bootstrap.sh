@@ -16,6 +16,8 @@ if ! xcode-select -p >/dev/null 2>&1; then
   exit 1
 fi
 
+export PATH="/nix/var/nix/profiles/default/bin:/opt/homebrew/bin:/opt/homebrew/sbin:$PATH"
+
 if ! command -v nix >/dev/null 2>&1; then
   echo "请先安装 Determinate Nix："
   echo "https://determinate.systems/install/"

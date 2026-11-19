@@ -1,0 +1,6 @@
+*.backup
+*.bak
+*.before-*
+*.impure-backup
+.DS_Store
+local-user.nix

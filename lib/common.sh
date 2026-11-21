@@ -28,6 +28,7 @@ SYSTEM_PROFILE="$V2CC_SYSROOT/nix/var/nix/profiles/system"
 NIX_DEFAULT_BIN="$V2CC_SYSROOT/nix/var/nix/profiles/default/bin"
 NIX_RECEIPT="$V2CC_SYSROOT/nix/receipt.json"
 BREW_PREFIX="$V2CC_SYSROOT/opt/homebrew"
+ZSH_BIN="$V2CC_SYSROOT/bin/zsh"
 CLT_PLACEHOLDER="$V2CC_SYSROOT/tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress"
 
 # Third-party installers are fetched from immutable, versioned URLs and
@@ -41,6 +42,11 @@ HOMEBREW_INSTALL_SHA256="8fd2f1a5287a7c2e3d7362924c677edcc04c5a0e16448c77132d056
 # Anthropic publishes no versioned URL for this script. It verifies the
 # binary it downloads against Anthropic's own release manifest.
 CLAUDE_INSTALL_URL="https://claude.ai/install.sh"
+
+# The PATH of the terminal window that started the setup, captured before
+# any script extends PATH for its own use.
+V2CC_WINDOW_PATH="${V2CC_WINDOW_PATH:-$PATH}"
+export V2CC_WINDOW_PATH
 
 info() { printf '==> %s\n' "$*"; }
 ok() { printf '  ✓ %s\n' "$*"; }
@@ -125,4 +131,27 @@ use_nix_and_brew_path() {
 
 nix_flakes() {
   nix --extra-experimental-features 'nix-command flakes' "$@"
+}
+
+# True when the terminal window that started the setup can already run
+# `claude`. A window opened before the install keeps the PATH it started
+# with, so it cannot, however well the install went.
+window_sees_claude() {
+  PATH="$V2CC_WINDOW_PATH" command -v claude >/dev/null 2>&1
+}
+
+# What `claude` resolves to in a newly opened Terminal window: a login,
+# interactive zsh started from a clean environment rather than from this
+# shell's PATH. Prints nothing when it does not resolve. A startup file
+# that hangs is cut off after 30 seconds.
+fresh_zsh_claude() {
+  local user
+  user="$(id -un)"
+  # The expansion belongs to the fresh shell, not to this one.
+  # shellcheck disable=SC2016
+  env -i HOME="$HOME" USER="$user" LOGNAME="$user" SHELL=/bin/zsh \
+    TERM="${TERM:-xterm-256color}" PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+    /usr/bin/perl -e 'alarm 30; exec @ARGV' \
+    "$ZSH_BIN" -l -i -c 'print -r -- "V2CC_CLAUDE=$(command -v claude)"' \
+    </dev/null 2>/dev/null | sed -n 's/^V2CC_CLAUDE=//p' | tail -n 1
 }

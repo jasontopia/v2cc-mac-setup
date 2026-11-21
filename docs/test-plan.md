@@ -18,7 +18,7 @@
 | A3 | 观察 `[2/7]` | 通过 softwareupdate 安装，无弹窗；若它装不上，会弹出系统安装对话框，点"安装"后脚本自动继续 | 等待超过 60 分钟 |
 | A4 | 观察 `[5/7]` | 显示"这是首次部署"，随后"系统配置已激活" | 出现 `Unexpected files in /etc`（见下） |
 | A5 | 观察 `[7/7]` | 每项都是 ✓，结尾"验证通过"和"V2CC 部署完成" | 任何一项 ✗ |
-| A6 | 重新打开终端，运行 `claude --version`、`git --version`、`node --version` | 都有版本号输出 | 命令找不到 |
+| A6 | 新开一个终端窗口（部署前就开着的窗口看不到 `claude`，脚本结尾会提示），运行 `claude --version`、`git --version`、`node --version` | 都有版本号输出 | 新窗口里命令找不到 |
 | A7 | 运行 `~/v2cc-mac-setup/bootstrap.sh` | 七步全部显示"跳过"或"无需切换"；除验证外没有任何安装或切换；不要求输入密码 | 有任何重新安装或切换 |
 | A8 | 重启，登录 `v2cc`，运行 `~/v2cc-mac-setup/verify.sh` | "验证通过" | 任何一项 ✗ |
 | A9 | 登录机主账户，打开终端 | 终端正常，机主的文件和设置没有变化 | 终端报错或设置变化 |
@@ -46,14 +46,17 @@
 前提：`howard`（501）和 `v2cc`（502）都是管理员；当前系统由本仓库以 `howard`
 身份部署。
 
+验收范围：机主账户只要求"保留、能正常登录、没有损坏"；开发环境可用只针对客户
+账户 `v2cc`。"部署前已有的账户、服务和命令全部保留"由脚本自动检查，不是手工步骤。
+
 | # | 操作 | 预期结果 | 停止条件 |
 | --- | --- | --- | --- |
 | B1 | 在 `v2cc` 运行演练入口命令 | "受管理的账户：howard v2cc"；"主用户（system.primaryUser）：howard"；"已保留当前系统中已有的账户配置：howard"；"当前系统管理的账户、服务和命令在新配置中全部保留"；变化列表里只有 `activation-v2cc`、`hm_Usersv2cc.*`、`home-manager` 等新增项，没有任何 `howard` 相关的移除 | 出现任何 ✗（说明 howard 的配置不是本仓库这个版本生成的，见下） |
 | B2 | 获得批准后，在 `v2cc` 运行正式入口命令，确认整机切换 | 输出中同时有 `Activating home-manager configuration for howard` 和 `... for v2cc`；"部署前已有的账户、服务和命令全部保留"；"验证通过" | 激活失败（会自动回退，回退后停止） |
-| B3 | 登录 `howard`，打开新终端，运行 `which git node home-manager` 和 `ls -l ~/.local/state/home-manager/gcroots/current-home` | 命令都在；`current-home` 指向的路径与部署前相同 | 路径改变或命令缺失 |
-| B4 | 在 `howard` 检查原有凭据：`gh auth status`、`ssh -T git@github.com`、`git config --global --list` | 与部署前一致 | 任何凭据丢失 |
+| B3 | 在 `v2cc` 新开一个终端窗口，运行 `claude --version` | 有版本号输出 | 新窗口里命令找不到 |
+| B4 | 登录机主账户 `howard` | 账户还在，能正常登录，没有损坏。机主账户不用开发环境，不需要检查其中的 git、node、home-manager、gh | 无法登录或账户异常 |
 | B5 | `howard` 未登录图形界面时（注销后）在 `v2cc` 重跑 `~/v2cc-mac-setup/bootstrap.sh` | "新配置已经是当前系统，无需切换" | 报错 |
-| B6 | 在 `v2cc` 运行 `./rollback.sh`，确认 | "已回退到"部署前的系统路径；`howard` 一切如常 | 回退失败 |
+| B6 | 在 `v2cc` 运行 `./rollback.sh`，确认 | "已回退到"部署前的系统路径；`howard` 账户仍能正常登录 | 回退失败 |
 | B7 | 重新运行 `./bootstrap.sh` | 再次部署成功，"验证通过" | 任何 ✗ |
 
 ### 如果 B1 被拒绝

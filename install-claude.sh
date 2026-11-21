@@ -38,6 +38,10 @@ fi
 
 if [ -x "$claude_bin" ]; then
   ok "Claude Code：$("$claude_bin" --version)"
+  if ! window_sees_claude; then
+    warn "这个终端窗口是在安装之前打开的，在它里面还找不到 claude 命令。"
+    warn "新开一个终端窗口，或在本窗口运行 exec zsh -l 之后才能使用。"
+  fi
 elif ! is_dry_run; then
   die "Claude Code 安装后仍不可用：$claude_bin"
 fi

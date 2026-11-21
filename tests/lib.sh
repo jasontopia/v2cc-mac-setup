@@ -200,6 +200,13 @@ EOF
 [ -e "$SB/state/keychain_github" ] || exit 44
 EOF
 
+  # The real zsh, so startup-file behaviour is the real thing. -d skips the
+  # host's own /etc/zprofile and /etc/zshrc, which may put the developer's
+  # tools on PATH; the sandbox home's ~/.zprofile and ~/.zshrc still apply.
+  write_stub "$SB/root/bin/zsh" <<'EOF'
+exec /bin/zsh -d "$@"
+EOF
+
   # Installed later by the stub installers, exactly where the real ones land.
   write_stub "$SB/late/nix" <<'EOF'
 echo "nix $*" >>"$SB/calls.log"
@@ -325,17 +332,20 @@ have_claude() {
 }
 
 # run SCRIPT [ARGS...]: run one of the sandboxed scripts with a clean
-# environment and no terminal. Extra environment goes in RUN_ENV.
+# environment and no terminal. Extra environment goes in RUN_ENV; RUN_PATH
+# is put in front of PATH, as a terminal window that already has it would.
 RUN_ENV=""
+RUN_PATH=""
 run() {
   local script="$1"
   shift
   # shellcheck disable=SC2086
-  out="$(env -i PATH="$SB/bin:/usr/bin:/bin:/usr/sbin:/sbin" HOME="$SB/home" \
+  out="$(env -i PATH="$RUN_PATH$SB/bin:/usr/bin:/bin:/usr/sbin:/sbin" HOME="$SB/home" \
     V2CC_SYSROOT="$SB/root" LC_ALL=en_US.UTF-8 $RUN_ENV \
     /bin/bash "$SB/repo/$script" "$@" 2>&1 </dev/null)"
   rc=$?
   RUN_ENV=""
+  RUN_PATH=""
 }
 
 # A GitHub token-shaped string, assembled at run time so that no

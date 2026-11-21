@@ -190,6 +190,11 @@ step_verify
 
 if is_dry_run; then
   info "演练结束，系统没有任何改动。"
+elif window_sees_claude; then
+  info "V2CC 部署完成。现在可以运行 claude 开始使用。"
 else
-  info "V2CC 部署完成。请重新打开终端，然后运行 claude 开始使用。"
+  info "V2CC 部署完成。"
+  info "注意：这个终端窗口是在部署之前打开的，在它里面还找不到 claude 命令。"
+  info "请新开一个终端窗口（⌘N），或者在本窗口运行：exec zsh -l"
+  info "然后运行 claude 开始使用。"
 fi

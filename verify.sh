@@ -161,7 +161,15 @@ else
 fi
 
 info "检查 Claude Code..."
-check "Claude Code" "$HOME/.local/bin/claude" --version
+check "Claude Code 已安装" "$HOME/.local/bin/claude" --version
+# Being installed is not the same as being found: test what a newly opened
+# terminal window resolves, not an absolute path.
+resolved="$(fresh_zsh_claude)"
+if [ "${resolved#/}" != "$resolved" ] && [ -x "$resolved" ]; then
+  pass "新开的终端窗口能找到 claude 命令（${resolved}）"
+else
+  flunk "新开的终端窗口找不到 claude 命令。请确认 ~/.zprofile 里有这一行：export PATH=\"\$HOME/.local/bin:\$PATH\"，并且 ~/.zshrc 没有重设 PATH。"
+fi
 
 check_credentials
 finish

@@ -403,6 +403,53 @@ assert_out "磁盘可用空间不足"
 assert_not_called '.'
 end_test
 
+# --------------------------------------------------------------- Claude Code
+
+begin_test "claude: a window opened before the install is told it cannot see claude yet"
+run bootstrap.sh
+assert_rc 0
+assert_out "新开的终端窗口能找到 claude 命令（$SB/home/.local/bin/claude）"
+assert_out "这个终端窗口是在安装之前打开的，在它里面还找不到 claude 命令"
+assert_out "请新开一个终端窗口（⌘N），或者在本窗口运行：exec zsh -l"
+assert_no_out "现在可以运行 claude 开始使用"
+end_test
+
+begin_test "claude: a window that already has claude on PATH is told to just run it"
+run bootstrap.sh
+RUN_PATH="$SB/home/.local/bin:"
+run bootstrap.sh
+assert_rc 0
+assert_out "V2CC 部署完成。现在可以运行 claude 开始使用。"
+assert_no_out "在它里面还找不到 claude 命令"
+end_test
+
+begin_test "claude: installed but not on a new terminal's PATH fails verification honestly"
+run bootstrap.sh
+: >"$SB/home/.zprofile"
+run verify.sh
+assert_rc 1
+assert_out "✓ Claude Code 已安装"
+assert_out "✗ 新开的终端窗口找不到 claude 命令"
+assert_out "验证未通过：1 项失败"
+end_test
+
+begin_test "claude: a ~/.zshrc that resets PATH after ~/.zprofile fails verification honestly"
+run bootstrap.sh
+echo 'export PATH=/usr/bin:/bin' >"$SB/home/.zshrc"
+run verify.sh
+assert_rc 1
+assert_out "✗ 新开的终端窗口找不到 claude 命令"
+end_test
+
+begin_test "claude: the PATH of the shell running verify does not hide a missing ~/.zprofile line"
+run bootstrap.sh
+: >"$SB/home/.zprofile"
+RUN_PATH="$SB/home/.local/bin:"
+run verify.sh
+assert_rc 1
+assert_out "✗ 新开的终端窗口找不到 claude 命令"
+end_test
+
 # --------------------------------------------------------------- credentials
 
 begin_test "credentials: a clean account passes"

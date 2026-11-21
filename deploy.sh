@@ -1,39 +1,131 @@
 #!/bin/bash
+#
+# Build the system configuration, prove it keeps every account the running
+# system manages, then switch to it. Rolls back if activation fails.
+#
+# Safe to rerun: nothing is activated when the built configuration is
+# already the running one.
 set -euo pipefail
 
 cd "$(dirname "$0")"
+# shellcheck source=lib/common.sh
+. ./lib/common.sh
+# shellcheck source=lib/system-guard.sh
+. ./lib/system-guard.sh
+
+use_nix_and_brew_path
+
+command -v nix >/dev/null 2>&1 ||
+  die "未找到 Nix。请运行 ./bootstrap.sh，它会检查并安装缺失的依赖。"
+[ -x "$BREW_PREFIX/bin/brew" ] ||
+  die "未找到 Homebrew。请运行 ./bootstrap.sh，它会检查并安装缺失的依赖。"
 
 ./prepare.sh
 
-command -v nix >/dev/null || {
-  echo "错误：请先安装 Determinate Nix"
-  exit 1
-}
+info "构建系统配置（只构建，不改动系统）..."
+new_system="$(nix_flakes build "path:$PWD#darwinConfigurations.$FLAKE_ATTR.system" \
+  --no-link --print-out-paths)"
+[ -n "$new_system" ] && [ -x "$new_system/activate" ] ||
+  die "构建没有产出可用的系统配置。"
+new_system="$(resolve_link "$new_system")"
+ok "新配置：$new_system"
 
-if [ ! -x /opt/homebrew/bin/brew ]; then
-  echo "需要先安装 Homebrew，停止部署。"
-  echo "官方安装说明：https://brew.sh"
-  exit 1
-fi
+current_system="$(resolve_link "$CURRENT_SYSTEM_LINK")"
+profile_system="$(resolve_link "$SYSTEM_PROFILE")"
 
-if [ ! -x /usr/bin/xcode-select ] || ! xcode-select -p >/dev/null 2>&1; then
-  echo "需要先安装 Xcode Command Line Tools，停止部署。"
-  exit 1
-fi
-
-echo "验证系统配置..."
-nix --extra-experimental-features 'nix-command flakes' \
-  build "path:$PWD#darwinConfigurations.v2cc-test.system" --no-link
-
-echo "激活系统配置..."
-if command -v darwin-rebuild >/dev/null 2>&1; then
-  sudo darwin-rebuild switch --flake "path:$PWD#v2cc-test"
+info "检查新配置是否会影响本机已有的账户..."
+if [ -z "$current_system" ]; then
+  ok "本机还没有 nix-darwin 系统配置，这是首次部署。"
+elif problems="$(guard_compare "$current_system" "$new_system")"; then
+  ok "当前系统管理的账户、服务和命令在新配置中全部保留。"
 else
-  sudo nix --extra-experimental-features 'nix-command flakes' \
-    run nix-darwin -- switch --flake "path:$PWD#v2cc-test"
+  printf '%s\n' "$problems" | while IFS= read -r line; do fail "$line"; done
+
+  # Everything the operator needs to decide what to do, in one file, so
+  # nobody has to run diagnostic commands by hand.
+  report="$V2CC_STATE_DIR/guard-report.txt"
+  mkdir -p "$V2CC_STATE_DIR"
+  {
+    printf 'V2CC 部署被安全检查拦截 %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    printf '部署版本：%s\n' "$(cat .v2cc-commit 2>/dev/null || printf '未知')"
+    printf '运行部署的账户：%s\n\n' "$(id -un)"
+    printf '当前系统：%s\n' "$current_system"
+    printf '  版本信息：%s\n' "$(tr -d '\n' <"$current_system/darwin-version.json" 2>/dev/null)"
+    printf '  主用户：%s\n' "$(sys_primary_user "$current_system")"
+    printf '  Home Manager 账户：%s\n\n' "$(sys_hm_users "$current_system" | tr '\n' ' ')"
+    printf '新配置：%s\n' "$new_system"
+    printf '  主用户：%s\n' "$(sys_primary_user "$new_system")"
+    printf '  Home Manager 账户：%s\n\n' "$(sys_hm_users "$new_system" | tr '\n' ' ')"
+    printf '拦截原因：\n%s\n\n' "$problems"
+    printf '闭包差异（nix store diff-closures）：\n'
+    nix_flakes store diff-closures "$current_system" "$new_system" 2>&1 |
+      sed -E $'s/\x1b\\[[0-9;]*m//g' || true
+  } >"$report"
+
+  cat >&2 <<EOF
+
+已停止，系统没有任何改动。
+nix-darwin 的系统配置是整机唯一的一份：切换到新配置后，上面列出的内容
+将被移除或改变。这通常说明本机当前的配置不是由本仓库的同一版本生成的
+（例如机主有自己的 nix-darwin 配置，或本机部署的是旧版本）。
+诊断信息已保存，请把这个文件发给 V2CC 运营方：
+  $report
+EOF
+  exit 3
 fi
 
-echo "安装或验证 Claude Code..."
-./install-claude.sh
+if [ "$current_system" = "$new_system" ] && [ "$profile_system" = "$new_system" ]; then
+  ok "新配置已经是当前系统，无需切换。"
+  exit 0
+fi
 
-echo "V2CC 部署完成"
+if [ -n "$current_system" ]; then
+  info "与当前系统相比的变化："
+  nix_flakes store diff-closures "$current_system" "$new_system" || true
+fi
+
+if is_dry_run; then
+  info "[演练] 将把系统切换到 ${new_system}（未执行）。"
+  exit 0
+fi
+
+if [ -n "$current_system" ]; then
+  confirm "将切换整机的系统配置（已确认不影响现有账户）。继续？" ||
+    die "已取消，系统没有任何改动。"
+fi
+
+# Record what to return to. When only the boot profile lags behind an
+# already running system, the earlier record still names the real
+# predecessor and is kept.
+if [ "$current_system" != "$new_system" ]; then
+  mkdir -p "$V2CC_STATE_DIR"
+  {
+    printf 'previous=%s\n' "$current_system"
+    printf 'new=%s\n' "$new_system"
+    printf 'allow_system_changes=%s\n' "${V2CC_ALLOW_SYSTEM_CHANGES:-0}"
+    printf 'at=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  } >"$V2CC_STATE_DIR/last-deploy"
+fi
+
+ensure_sudo "切换系统配置"
+
+# The same two steps `darwin-rebuild switch` performs, applied to exactly
+# the closure that was checked above.
+info "激活系统配置..."
+activated=0
+if sudo -H "$NIX_DEFAULT_BIN/nix-env" -p "$SYSTEM_PROFILE" --set "$new_system" &&
+  sudo "$new_system/activate"; then
+  activated=1
+fi
+
+if [ "$activated" != "1" ] || [ "$(resolve_link "$CURRENT_SYSTEM_LINK")" != "$new_system" ]; then
+  fail "激活失败。"
+  if [ -n "$current_system" ] && [ "$current_system" != "$new_system" ]; then
+    info "正在回退到之前的系统配置..."
+    ./rollback.sh --auto || die "自动回退失败。请联系 V2CC 运营方，并保留以上全部输出。"
+    die "激活失败，已回退到之前的系统配置。修复上面的错误后可以重新运行。"
+  fi
+  die "激活失败。本机此前没有系统配置可回退；修复上面的错误后重新运行即可。"
+fi
+
+ok "系统配置已激活：$new_system"

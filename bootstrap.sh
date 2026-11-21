@@ -83,7 +83,11 @@ step_clt() {
     sed -n 's/^.*Label: \(Command Line Tools.*\)$/\1/p' | sort -V | tail -n 1)"
   if [ -n "$label" ]; then
     info "正在安装 ${label}（需要几分钟）..."
-    sudo softwareupdate -i "$label" || warn "softwareupdate 安装未成功，改用系统安装对话框。"
+    if sudo softwareupdate -i "$label"; then
+      sudo xcode-select --switch /Library/Developer/CommandLineTools
+    else
+      warn "softwareupdate 安装未成功，改用系统安装对话框。"
+    fi
   fi
   sudo /bin/rm -f "$CLT_PLACEHOLDER"
 

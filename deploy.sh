@@ -94,13 +94,18 @@ if [ -n "$current_system" ]; then
     die "已取消，系统没有任何改动。"
 fi
 
-mkdir -p "$V2CC_STATE_DIR"
-{
-  printf 'previous=%s\n' "$current_system"
-  printf 'new=%s\n' "$new_system"
-  printf 'allow_system_changes=%s\n' "${V2CC_ALLOW_SYSTEM_CHANGES:-0}"
-  printf 'at=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-} >"$V2CC_STATE_DIR/last-deploy"
+# Record what to return to. When only the boot profile lags behind an
+# already running system, the earlier record still names the real
+# predecessor and is kept.
+if [ "$current_system" != "$new_system" ]; then
+  mkdir -p "$V2CC_STATE_DIR"
+  {
+    printf 'previous=%s\n' "$current_system"
+    printf 'new=%s\n' "$new_system"
+    printf 'allow_system_changes=%s\n' "${V2CC_ALLOW_SYSTEM_CHANGES:-0}"
+    printf 'at=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  } >"$V2CC_STATE_DIR/last-deploy"
+fi
 
 ensure_sudo "切换系统配置"
 
@@ -115,7 +120,7 @@ fi
 
 if [ "$activated" != "1" ] || [ "$(resolve_link "$CURRENT_SYSTEM_LINK")" != "$new_system" ]; then
   fail "激活失败。"
-  if [ -n "$current_system" ]; then
+  if [ -n "$current_system" ] && [ "$current_system" != "$new_system" ]; then
     info "正在回退到之前的系统配置..."
     ./rollback.sh --auto || die "自动回退失败。请联系 V2CC 运营方，并保留以上全部输出。"
     die "激活失败，已回退到之前的系统配置。修复上面的错误后可以重新运行。"

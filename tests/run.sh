@@ -27,6 +27,7 @@ begin_test "blank Mac: one command installs everything, deploys and verifies"
 run bootstrap.sh
 assert_rc 0
 assert_called '^softwareupdate -i Command Line Tools for Xcode-26.1$'
+assert_called '^xcode-select --switch /Library/Developer/CommandLineTools$'
 assert_called '^nix-installer install --no-confirm$'
 assert_called '^brew-installer NONINTERACTIVE=1$'
 assert_called "^nix-env -p $SB/root/nix/var/nix/profiles/system --set $(system_path fresh)$"
@@ -316,6 +317,23 @@ run deploy.sh
 assert_rc 3
 assert_out "无法从系统配置中识别 Home Manager 账户"
 assert_not_called '^activate'
+end_test
+
+begin_test "failure: a boot profile left behind is repaired without losing the rollback target"
+owner_machine
+make_system coexist howard "howard=gen-howard v2cc=gen-v2cc"
+system_path coexist >"$SB/state/new_system"
+RUN_ENV="V2CC_ASSUME_YES=1"
+run deploy.sh
+# The running system is the new one, but the boot profile points elsewhere.
+ln -sfn "$SB/store/owner" "$SB/root/nix/var/nix/profiles/system"
+: >"$SB/calls.log"
+RUN_ENV="V2CC_ASSUME_YES=1"
+run deploy.sh
+assert_rc 0
+assert_called '^activate coexist$'
+assert_eq "$(link_target "$SB/root/nix/var/nix/profiles/system")" "$(system_path coexist)"
+assert_eq "$(sed -n 's/^previous=//p' "$SB/home/.local/state/v2cc/last-deploy")" "$(system_path owner)"
 end_test
 
 # ------------------------------------------------------------------ rollback

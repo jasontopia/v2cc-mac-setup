@@ -5,9 +5,14 @@
 #
 # Every test gets its own fake machine: a fake filesystem root (V2CC_SYSROOT),
 # a fake home, a private copy of the scripts, and a directory of stub
-# commands placed first on PATH. sudo, installers, nix, softwareupdate and
-# friends are all stubs that only touch the sandbox and append what they
-# were asked to do to calls.log. Nothing here can change the real machine.
+# commands placed first on PATH. sudo, installers, nix, softwareupdate,
+# pmset, defaults, sysadminctl and friends are all stubs that only touch the
+# sandbox and append what they were asked to do to calls.log. Nothing here
+# can change the real machine, and nothing here reads it either.
+#
+# The stubs for privileged tools refuse to change anything unless they were
+# started through the sudo stub, so a script that forgets sudo fails here
+# the way it would on a real Mac.
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP_ROOT="$(mktemp -d)"
@@ -80,7 +85,8 @@ new_sandbox() {
   mkdir -p "$SB/root/tmp" "$SB/root/run" "$SB/root/nix/var/nix/profiles" \
     "$SB/home" "$SB/state" "$SB/store" "$SB/bin" "$SB/late" "$SB/repo"
   : >"$SB/calls.log"
-  cp -R "$REPO_ROOT"/*.sh "$REPO_ROOT/lib" "$REPO_ROOT/tools" "$REPO_ROOT/flake.nix" "$SB/repo/"
+  cp -R "$REPO_ROOT"/*.sh "$REPO_ROOT/lib" "$REPO_ROOT/tools" "$REPO_ROOT/modules" \
+    "$REPO_ROOT/flake.nix" "$SB/repo/"
 
   # A blank Apple Silicon Mac, in a fresh administrator account named v2cc.
   echo v2cc >"$SB/state/user"
@@ -91,6 +97,12 @@ new_sandbox() {
   echo 27.2 >"$SB/state/macos"
   echo 200 >"$SB/state/free_gb"
   echo v2cc >"$SB/state/brew_owner"
+  # Power settings as a Mac mini has them out of the box, FileVault on.
+  printf 'c %s\n' 'displaysleep 10' 'womp 1' 'sleep 1' 'autorestart 0' 'disksleep 10' >"$SB/state/pmset"
+  printf '%s\n' displaysleep disksleep sleep womp autorestart >"$SB/state/pmset_caps"
+  echo "FileVault is On." >"$SB/state/filevault"
+  echo immediate >"$SB/state/screenlock"
+  echo "root:600" >"$SB/state/kcpassword_mode"
 
   write_stub "$SB/bin/uname" <<'EOF'
 case "$1" in -s) echo Darwin ;; -m) cat "$SB/state/arch" ;; esac
@@ -143,7 +155,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ $# -gt 0 ] || exit 0
-exec "$@"
+STUB_AS_ROOT=1 exec "$@"
 EOF
   write_stub "$SB/bin/curl" <<'EOF'
 dest="" url="" config_on_stdin=0 dump_headers=0
@@ -190,11 +202,123 @@ else
 fi
 EOF
   write_stub "$SB/bin/stat" <<'EOF'
-if [ "$1" = "-f" ] && [ "$2" = "%Su" ]; then cat "$SB/state/brew_owner"; else exec /usr/bin/stat "$@"; fi
+if [ "$1" = "-f" ] && [ "$2" = "%Su" ]; then
+  cat "$SB/state/brew_owner"
+elif [ "$1" = "-f" ] && [ "$2" = "%Su:%Lp" ]; then
+  # The sandbox cannot create a root-owned file; say what the test set.
+  [ -e "$3" ] && cat "$SB/state/kcpassword_mode"
+else
+  exec /usr/bin/stat "$@"
+fi
 EOF
   write_stub "$SB/bin/launchctl" <<'EOF'
 echo "launchctl $*" >>"$SB/calls.log"
-[ "$1" != "print" ] || [ -e "$SB/root/run/current-system" ]
+case "$1 $2" in
+  "print system/com.netease.uuremote.daemon" | print\ gui/*/com.netease.uuremote.agent)
+    [ -e "$SB/state/uuremote" ] ;;
+  print\ *) [ -e "$SB/root/run/current-system" ] ;;
+esac
+EOF
+  # pmset: state is one "source setting value" line per setting, where
+  # source is c (wall power), b (battery) or u (UPS).
+  write_stub "$SB/bin/pmset" <<'EOF'
+echo "pmset $*" >>"$SB/calls.log"
+state="$SB/state/pmset"
+case "$1" in
+  -g)
+    case "$2" in
+      custom)
+        [ ! -e "$SB/state/pmset_unreadable" ] || exit 0
+        for src in b c u; do
+          grep -q "^$src " "$state" || continue
+          case "$src" in
+            b) echo "Battery Power:" ;;
+            c) echo "AC Power:"; echo " Sleep On Power Button 1" ;;
+            u) echo "UPS Power:" ;;
+          esac
+          awk -v s="$src" '$1 == s { printf " %-20s %s\n", $2, $3 }' "$state"
+        done ;;
+      cap) echo "Capabilities for AC Power:"; sed 's/^/ /' "$SB/state/pmset_caps" ;;
+    esac ;;
+  -a | -b | -c | -u)
+    [ "${STUB_AS_ROOT:-}" = 1 ] || { echo "pmset: must be run as root" >&2; exit 1; }
+    [ ! -e "$SB/state/pmset_fails_$2" ] || { echo "pmset: simulated failure for $2" >&2; exit 1; }
+    awk -v s="${1#-}" -v k="$2" -v v="$3" \
+      '(s == "a" || $1 == s) && $2 == k { $3 = v } { print }' "$state" >"$state.new"
+    mv "$state.new" "$state" ;;
+esac
+EOF
+  # defaults: one file per key under state/defaults/<domain>/.
+  write_stub "$SB/bin/defaults" <<'EOF'
+echo "defaults $*" >>"$SB/calls.log"
+dir="$SB/state/defaults/$(printf '%s' "$2" | tr '/' '_')"
+case "$1" in
+  read)
+    [ -e "$dir/$3" ] || { echo "The domain/default pair of ($2, $3) does not exist" >&2; exit 1; }
+    cat "$dir/$3" ;;
+  write | delete)
+    [ "${STUB_AS_ROOT:-}" = 1 ] || { echo "defaults: could not write domain $2" >&2; exit 1; }
+    if [ "$1" = delete ]; then
+      [ -e "$dir/$3" ] || exit 1
+      rm "$dir/$3"
+    else
+      mkdir -p "$dir"
+      case "$4:$5" in
+        -bool:true) echo 1 ;;
+        -bool:false) echo 0 ;;
+        -int:*) echo "$5" ;;
+        *) echo "defaults stub: unsupported value $4 $5" >&2; exit 1 ;;
+      esac >"$dir/$3"
+    fi ;;
+esac
+EOF
+  write_stub "$SB/bin/fdesetup" <<'EOF'
+echo "fdesetup $*" >>"$SB/calls.log"
+[ "$1" = status ] && cat "$SB/state/filevault"
+EOF
+  write_stub "$SB/bin/sysctl" <<'EOF'
+[ "$*" = "-n kern.boottime" ] && echo "{ sec = 1795200000, usec = 0 } Fri Nov 20 12:00:00 2026"
+EOF
+  # sysadminctl: like the real one it answers through the system log format
+  # on stderr, and it asks for the password itself, on the terminal. The
+  # password it is given is thrown away: the fake credential file never
+  # contains it, so any trace of it found later was left by our scripts.
+  write_stub "$SB/bin/sysadminctl" <<'EOF'
+echo "sysadminctl $*" >>"$SB/calls.log"
+say() { echo "2026-11-21 00:00:00.000 sysadminctl[100:200] $*" >&2; }
+login="$SB/state/defaults/_Library_Preferences_com.apple.loginwindow"
+case "$1 $2" in
+  "-screenLock status") say "screenLock delay is $(cat "$SB/state/screenlock")" ;;
+  "-autologin status")
+    if [ "$(cat "$SB/state/filevault")" = "FileVault is On." ]; then
+      say "Automatic login is disabled because FileVault is enabled."
+    elif [ -e "$login/autoLoginUser" ]; then
+      say "Automatic login user: $(cat "$login/autoLoginUser")"
+    else
+      say "Automatic login is disabled."
+    fi ;;
+  "-autologin set")
+    [ "${STUB_AS_ROOT:-}" = 1 ] || { say "Operation is not permitted without authentication."; exit 1; }
+    [ "$3" = "-userName" ] && [ "$5 $6" = "-password -" ] && [ $# -eq 6 ] ||
+      { say "stub: expected -autologin set -userName <user> -password -"; exit 1; }
+    # Echo goes off before the prompt, so an answer typed the moment the
+    # prompt appears is never shown.
+    stty -echo </dev/tty || exit 1
+    printf 'Enter password for %s: ' "$4" >/dev/tty
+    IFS= read -r password </dev/tty
+    stty echo </dev/tty
+    printf '\n' >/dev/tty
+    [ -n "$password" ] || { say "No password given."; exit 1; }
+    [ ! -e "$SB/state/autologin_set_fails" ] || { say "Could not set automatic login."; exit 1; }
+    mkdir -p "$login" "$SB/root/etc"
+    [ -e "$SB/state/autologin_set_incomplete" ] || echo "$4" >"$login/autoLoginUser"
+    echo "stub-obfuscated" >"$SB/root/etc/kcpassword" ;;
+  "-autologin off")
+    [ "${STUB_AS_ROOT:-}" = 1 ] || { say "Operation is not permitted without authentication."; exit 1; }
+    rm -f "$login/autoLoginUser"
+    # Older systems were reported to leave the credential file behind.
+    [ -e "$SB/state/kcpassword_sticks" ] || rm -f "$SB/root/etc/kcpassword" ;;
+esac
 EOF
   write_stub "$SB/bin/security" <<'EOF'
 [ -e "$SB/state/keychain_github" ] || exit 44
@@ -213,7 +337,7 @@ echo "nix $*" >>"$SB/calls.log"
 case " $* " in
   *" --version "*) echo "nix (Determinate Nix 3.24.3) 2.36.0" ;;
   *" build "*) [ ! -e "$SB/state/build_fails" ] || exit 1; cat "$SB/state/new_system" ;;
-  *" diff-closures "*) echo "activation-v2cc: (no version) added" ;;
+  *" diff-closures "*) cat "$SB/state/diff_closures" 2>/dev/null || echo "activation-v2cc: (no version) added" ;;
 esac
 EOF
   write_stub "$SB/late/nix-env" <<'EOF'
@@ -247,6 +371,7 @@ EOF
 
   # By default the configuration built for this machine manages v2cc only.
   make_system fresh v2cc "v2cc=gen-v2cc"
+  add_always_on fresh
   system_path fresh >"$SB/state/new_system"
 }
 
@@ -281,7 +406,7 @@ make_system() {
   # The fake script must contain these expansions literally.
   # shellcheck disable=SC2016
   {
-    printf '#!/bin/bash\nset -e\n'
+    printf '#!/bin/bash\nset -e\nset -o pipefail\n'
     printf 'systemConfig=%s\n' "$dir"
     printf 'primaryUser=%s\n' "$primary"
     printf 'echo "activate ${systemConfig##*/}" >>%q\n' "$SB/calls.log"
@@ -304,6 +429,23 @@ make_system() {
   } >"$dir/activate"
   chmod +x "$dir/activate"
 }
+
+# What this repository builds today: the fake system NAME plus the real
+# always-on activation step (modules/always-on.sh), with comment lines
+# dropped as modules/always-on.nix drops them and /var/db/v2cc pointed into
+# the sandbox. make_system alone is a system built before that step existed.
+add_always_on() {
+  local activate="$SB/store/$1/activate" last
+  last="$(tail -n 1 "$activate")"
+  sed -i '' '$d' "$activate"
+  grep -Ev '^[[:space:]]*(#.*)?$' "$REPO_ROOT/modules/always-on.sh" |
+    sed "s#/var/db/v2cc#$SB/root/var/db/v2cc#g" >>"$activate"
+  printf '%s\n' "$last" >>"$activate"
+}
+
+# One setting of the fake machine, as the stubs hold it.
+pmset_state() { awk -v s="${2:-c}" -v k="$1" '$1 == s && $2 == k { print $3 }' "$SB/state/pmset"; }
+default_state() { cat "$SB/state/defaults/$(printf '%s' "$1" | tr '/' '_')/$2" 2>/dev/null || echo absent; }
 
 # Make NAME the running system, as if it had been activated earlier.
 set_running_system() {
@@ -346,6 +488,43 @@ run() {
   rc=$?
   RUN_ENV=""
   RUN_PATH=""
+}
+
+# run_tty SCRIPT [ARGS...] with TTY_DIALOG="prompt=answer|prompt=answer": the
+# same, but on a real terminal, typing each answer when its prompt appears.
+# For the steps that insist on a person. A prompt is matched on an ASCII part
+# of it. Exit code 97: the prompt never came; 98: the script ended before
+# it; 99: the dialog itself broke (expect exits 0 on its own errors).
+TTY_DIALOG=""
+run_tty() {
+  local script="$1" step dialog="" old_ifs="$IFS"
+  shift
+  IFS='|'
+  for step in $TTY_DIALOG; do
+    # One clause per line: expect reads a one-line braced block as a single
+    # pattern, which never matches and silently waits out the timeout.
+    dialog="$dialog
+      expect {
+        -ex {${step%%=*}} { }
+        timeout { exit 97 }
+        eof { exit 98 }
+      }
+      send -- {${step#*=}}
+      send \"\\r\""
+  done
+  IFS="$old_ifs"
+  out="$(LC_ALL=en_US.UTF-8 /usr/bin/expect -c "
+    set timeout 20
+    if {[catch {
+      spawn -noecho env -i PATH=$SB/bin:/usr/bin:/bin:/usr/sbin:/sbin HOME=$SB/home \
+        V2CC_SYSROOT=$SB/root LC_ALL=en_US.UTF-8 $RUN_ENV /bin/bash $SB/repo/$script $*
+      $dialog
+      expect eof
+      exit [lindex [wait] 3]
+    } problem]} { puts \$problem; exit 99 }" 2>&1 </dev/null)"
+  rc=$?
+  RUN_ENV=""
+  TTY_DIALOG=""
 }
 
 # A GitHub token-shaped string, assembled at run time so that no

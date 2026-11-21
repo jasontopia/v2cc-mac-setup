@@ -12,6 +12,8 @@ cd "$(dirname "$0")"
 . ./lib/common.sh
 # shellcheck source=lib/system-guard.sh
 . ./lib/system-guard.sh
+# shellcheck source=lib/always-on.sh
+. ./lib/always-on.sh
 
 use_nix_and_brew_path
 
@@ -74,14 +76,41 @@ EOF
   exit 3
 fi
 
-if [ "$current_system" = "$new_system" ] && [ "$profile_system" = "$new_system" ]; then
+# The always-on settings are written by the activation itself. They are due
+# when the new configuration carries them and nothing on this machine shows
+# they were applied: no record of the values from before. That is the case
+# on a first rollout, and again after ./rollback.sh --settings.
+always_on_due=0
+if sys_declares_always_on "$new_system" && [ ! -e "$ALWAYS_ON_BEFORE" ]; then
+  always_on_due=1
+fi
+
+if [ "$current_system" = "$new_system" ] && [ "$profile_system" = "$new_system" ] &&
+  [ "$always_on_due" = "0" ]; then
   ok "新配置已经是当前系统，无需切换。"
   exit 0
 fi
 
-if [ -n "$current_system" ]; then
+if [ -n "$current_system" ] && [ "$current_system" != "$new_system" ]; then
   info "与当前系统相比的变化："
-  nix_flakes store diff-closures "$current_system" "$new_system" || true
+  changes="$(nix_flakes store diff-closures "$current_system" "$new_system" 2>&1 || true)"
+  if [ -n "$changes" ]; then
+    printf '%s\n' "$changes"
+  else
+    note "软件包没有增加、减少或版本变化。"
+  fi
+fi
+
+if [ "$always_on_due" = "1" ]; then
+  # A change to the activation script alone does not show in the closure
+  # difference above, and these settings reach every account on the Mac.
+  info "本次切换会启用 7×24 在线设置。它们对整机生效，机主的账户同样受影响："
+  note "系统空闲时不再自动睡眠（显示器仍按原设置自动关闭）"
+  note "断电后恢复供电时自动开机"
+  note "开启「唤醒以供网络访问」（本机支持时）"
+  note "关闭闲置后自动退出登录"
+  note "macOS 更新不再自动安装和重启，改为在维护时段由人安装；检查更新、更新通知和安全数据的自动安装不变"
+  note "改动前的原值会记录在 ${ALWAYS_ON_BEFORE}，可用 ./rollback.sh 恢复"
 fi
 
 if is_dry_run; then
@@ -90,8 +119,13 @@ if is_dry_run; then
 fi
 
 if [ -n "$current_system" ]; then
-  confirm "将切换整机的系统配置（已确认不影响现有账户）。继续？" ||
-    die "已取消，系统没有任何改动。"
+  if [ "$always_on_due" = "1" ]; then
+    confirm "将切换整机的系统配置，并启用上面列出的整机设置（已确认现有账户的配置保持不变）。继续？" ||
+      die "已取消，系统没有任何改动。"
+  else
+    confirm "将切换整机的系统配置（已确认不影响现有账户）。继续？" ||
+      die "已取消，系统没有任何改动。"
+  fi
 fi
 
 # Record what to return to. When only the boot profile lags behind an
@@ -120,10 +154,26 @@ fi
 
 if [ "$activated" != "1" ] || [ "$(resolve_link "$CURRENT_SYSTEM_LINK")" != "$new_system" ]; then
   fail "激活失败。"
+  rolled_back=0
   if [ -n "$current_system" ] && [ "$current_system" != "$new_system" ]; then
     info "正在回退到之前的系统配置..."
     ./rollback.sh --auto || die "自动回退失败。请联系 V2CC 运营方，并保留以上全部输出。"
+    rolled_back=1
+  fi
+  # This activation was the one to apply the always-on settings for the
+  # first time and may have stopped halfway through them. Returning to a
+  # configuration without them has put them back already; in every other
+  # case (the same configuration, an earlier one that carries them too, or
+  # none at all) it is done here, so a failed activation leaves none behind.
+  if [ "$always_on_due" = "1" ] && [ -e "$ALWAYS_ON_BEFORE" ]; then
+    info "正在把 7×24 在线设置恢复为原值..."
+    ./rollback.sh --auto --settings ||
+      die "自动恢复设置失败。请联系 V2CC 运营方，并保留以上全部输出。"
+  fi
+  if [ "$rolled_back" = "1" ]; then
     die "激活失败，已回退到之前的系统配置。修复上面的错误后可以重新运行。"
+  elif [ -n "$current_system" ]; then
+    die "激活失败，系统配置没有变化。修复上面的错误后可以重新运行。"
   fi
   die "激活失败。本机此前没有系统配置可回退；修复上面的错误后重新运行即可。"
 fi

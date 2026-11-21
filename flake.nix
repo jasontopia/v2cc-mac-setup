@@ -50,6 +50,7 @@
         modules = [
           home-manager.darwinModules.home-manager
           nix-homebrew.darwinModules.nix-homebrew
+          ./modules/always-on.nix
 
           ({ pkgs, ... }: {
             nixpkgs.hostPlatform = "aarch64-darwin";

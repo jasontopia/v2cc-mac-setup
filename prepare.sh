@@ -1,10 +1,68 @@
 #!/bin/bash
+#
+# Generate machine.nix from the live machine.
+#
+# The set of managed accounts is the accounts the running system already
+# manages plus the account running this script. It never shrinks here, so
+# no account can drop another one by deploying.
 set -euo pipefail
 
 cd "$(dirname "$0")"
+# shellcheck source=lib/common.sh
+. ./lib/common.sh
+# shellcheck source=lib/system-guard.sh
+. ./lib/system-guard.sh
 
-USERNAME="$(id -un)"
-printf '"%s"\n' "$USERNAME" > local-user.nix
+current_user="$(id -un)"
+[ "$(id -u)" -ne 0 ] || die "请用要部署的账户直接运行，不要使用 sudo 或 root。"
+valid_username "$current_user" || die "账户名「${current_user}」含有不支持的字符。"
 
-echo "V2CC 用户: $USERNAME"
-echo "本机配置已生成"
+current_system="$(resolve_link "$CURRENT_SYSTEM_LINK")"
+existing_users=""
+primary_user=""
+if [ -n "$current_system" ]; then
+  existing_users="$(sys_hm_users "$current_system")"
+  primary_user="$(sys_primary_user "$current_system")"
+fi
+[ -n "$primary_user" ] || primary_user="$current_user"
+
+users="$(printf '%s\n%s\n' "$existing_users" "$current_user" | sed '/^$/d' | sort -u)"
+
+for user in $users "$primary_user"; do
+  valid_username "$user" || die "账户名「${user}」含有不支持的字符。"
+  id -u -- "$user" >/dev/null 2>&1 ||
+    die "当前系统配置管理的账户「${user}」在本机已不存在。请先由机主确认如何处理，再重新部署。"
+done
+
+# homebrew.user is "the user that owns the Homebrew installation".
+if [ -e "$BREW_PREFIX" ]; then
+  homebrew_user="$(stat -f '%Su' "$BREW_PREFIX")"
+  valid_username "$homebrew_user" ||
+    die "无法确定 Homebrew 目录 $BREW_PREFIX 的所属账户。"
+else
+  homebrew_user="$current_user"
+fi
+
+tmp_file="$(mktemp ./machine.nix.XXXXXX)"
+{
+  printf '# 由 prepare.sh 根据本机状态生成，请勿手工修改或提交。\n'
+  printf '{\n'
+  printf '  primaryUser = "%s";\n' "$primary_user"
+  printf '  homebrewUser = "%s";\n' "$homebrew_user"
+  printf '  users = ['
+  for user in $users; do
+    printf ' "%s"' "$user"
+  done
+  printf ' ];\n'
+  printf '}\n'
+} >"$tmp_file"
+mv "$tmp_file" machine.nix
+
+info "本机配置已生成"
+ok "当前账户：$current_user"
+ok "受管理的账户：$(printf '%s' "$users" | tr '\n' ' ')"
+ok "主用户（system.primaryUser）：$primary_user"
+ok "Homebrew 所属账户：$homebrew_user"
+if [ -n "$existing_users" ] && [ "$existing_users" != "$current_user" ]; then
+  ok "已保留当前系统中已有的账户配置：$(printf '%s' "$existing_users" | tr '\n' ' ')"
+fi

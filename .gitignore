@@ -3,4 +3,7 @@
 *.before-*
 *.impure-backup
 .DS_Store
+# Generated per machine by prepare.sh / the entry command.
+machine.nix
 local-user.nix
+.v2cc-commit

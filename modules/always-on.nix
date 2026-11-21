@@ -1,6 +1,7 @@
 # V2CC always-on settings: no idle system sleep (the display still sleeps),
 # start up after a power failure, wake for network access where supported,
-# idle auto-logout off, and no unattended installation of macOS updates.
+# idle auto-logout off, and the switch for installing macOS updates
+# unattended turned off.
 #
 # The settings themselves are in always-on.sh, which is included as text so
 # that every value is a visible line of the activation script: the

@@ -20,7 +20,7 @@
 #   - It does not set up UU远程. Signing in, allowing control and granting
 #     its permissions are done by a person, and whether UU远程 can connect
 #     to a locked screen or a login window has not been verified on a real
-#     machine. See docs/test-plan.md.
+#     machine. See docs/test-plan.md, section C, 阶段 2.
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -151,7 +151,7 @@ show_tradeoff() {
   5. 开启前必须已经取得机主对这台机器的明确同意。脚本无法替你确认这一点。
 
 尚未在真机验证：自动登录之后，以及锁屏或登录窗口状态下，UU远程 能否无人值守
-连接。开启自动登录不等于远程连接已经可用，要按 docs/test-plan.md 第二阶段逐项验证。
+连接。开启自动登录不等于远程连接已经可用，要按 docs/test-plan.md C 节阶段 2 逐项验证。
 EOF
   if [ "$lock_after_login" = "1" ]; then
     cat <<EOF
@@ -175,20 +175,51 @@ confirm_by_typing_account() {
   [ "$answer" = "$me" ] || die "输入的不是「${me}」，已取消，系统没有任何改动。"
 }
 
+# Automatic login as it works for this account right now: the identity of
+# the stored credential (inode, size, modification time), or nothing when
+# automatic login is not fully set up. Only the file's metadata is read,
+# never its contents. Comparing two answers tells whether anything touched
+# the working setup in between.
+working_auto_login() {
+  [ "$(auto_login_user)" = "$me" ] || return 0
+  [ "$(stat -f '%Su:%Lp' "$KCPASSWORD" 2>/dev/null || true)" = "root:600" ] || return 0
+  stat -f '%i:%z:%Fm' "$KCPASSWORD" 2>/dev/null || true
+}
+
 # Take the stored password away again. Used by disable and when enabling
-# did not end in the state it should have.
+# did not end in the state it should have. False when anything is left.
 revoke_credential() {
   sudo sysadminctl -autologin off >/dev/null 2>&1 ||
     warn "sysadminctl -autologin off 没有成功，改为直接清除。"
   if [ -e "$KCPASSWORD" ]; then
-    sudo rm -f "$KCPASSWORD"
-    warn "系统工具关闭自动登录后，保存的登录凭据 ${KCPASSWORD} 仍然存在，已直接删除。"
+    if sudo rm -f "$KCPASSWORD"; then
+      warn "系统工具关闭自动登录后，保存的登录凭据 ${KCPASSWORD} 仍然存在，已直接删除。"
+    else
+      warn "系统工具关闭自动登录后，保存的登录凭据 ${KCPASSWORD} 仍然存在，直接删除也没有成功。"
+    fi
   fi
   if [ -n "$(auto_login_user)" ]; then
-    sudo defaults delete "$LOGINWINDOW_PREFS" autoLoginUser >/dev/null 2>&1 || true
-    warn "系统工具关闭自动登录后，自动登录账户的设置仍然存在，已直接删除。"
+    if sudo defaults delete "$LOGINWINDOW_PREFS" autoLoginUser >/dev/null 2>&1; then
+      warn "系统工具关闭自动登录后，自动登录账户的设置仍然存在，已直接删除。"
+    else
+      warn "系统工具关闭自动登录后，自动登录账户的设置仍然存在，直接删除也没有成功。"
+    fi
   fi
   [ ! -e "$KCPASSWORD" ] && [ -z "$(auto_login_user)" ]
+}
+
+# Enabling did not end in the state it should have, and what is on the Mac
+# now cannot be trusted: take the stored password away and end by saying
+# which state that leaves the Mac in. $1 is not empty when automatic login
+# was working before this run, so that turning it off is never silent.
+revoke_failed_enable() {
+  if ! revoke_credential; then
+    die "撤销没有成功：自动登录的设置或保存的登录凭据可能还留在本机上，当前状态不确定。请运行 ./auto-login.sh status 查看，再运行 ./auto-login.sh disable 关闭。请保留以上输出并联系 V2CC 运营方。"
+  fi
+  if [ -n "$1" ]; then
+    die "已撤销。本机此前已经开启的自动登录也因此关闭了：现在自动登录是关闭的，下次重启会停在登录窗口，要有人在机器旁登录。需要恢复时重新运行 ./auto-login.sh enable。请保留以上输出。"
+  fi
+  die "已撤销，自动登录保持关闭。请保留以上输出。"
 }
 
 install_lock_agent() {
@@ -223,10 +254,14 @@ write_marker() {
       printf 'lock_agent=%s\n' "$lock_agent"
     fi
   } | sudo tee "$AUTO_LOGIN_MARKER" >/dev/null
+  # verify.sh and `status` read the marker without root, from any account,
+  # whatever the umask of the account that ran this.
+  sudo chmod 755 "$V2CC_DB_DIR"
+  sudo chmod 644 "$AUTO_LOGIN_MARKER"
 }
 
 enable() {
-  local kc_mode
+  local kc_mode was_working
 
   check_preconditions
   show_tradeoff
@@ -244,18 +279,26 @@ enable() {
   confirm_by_typing_account
   ensure_sudo "设置自动登录"
 
+  # This may be a rerun on a Mac where automatic login already works: after
+  # a password change, or to add or drop the lock after login. A failed
+  # attempt must not quietly take the working setup away, least of all on a
+  # Mac that is only reachable remotely.
+  was_working="$(working_auto_login)"
+
   info "接下来由 macOS 自带的 sysadminctl 询问账户 ${me} 的登录密码。密码只交给这个系统工具，本脚本不读取、不保存。"
   if ! sudo sysadminctl -autologin set -userName "$me" -password -; then
-    revoke_credential || true
-    die "系统工具没有完成自动登录的设置，已撤销，自动登录保持关闭。请保留以上输出。"
+    fail "系统工具没有完成自动登录的设置。"
+    if [ -n "$was_working" ] && [ "$(working_auto_login)" = "$was_working" ]; then
+      die "这次的设置没有生效。本机此前已经开启的自动登录原样保留，没有被改动：自动登录账户仍是 ${me}，系统保存的仍是此前那份登录凭据。如果这次是因为改了密码才重新运行，保存的还是旧密码，下次重启可能停在登录窗口，请再次运行 ./auto-login.sh enable。不再需要自动登录时运行 ./auto-login.sh disable。请保留以上输出。"
+    fi
+    revoke_failed_enable "$was_working"
   fi
 
   # Believe the machine, not the tool's exit status.
   kc_mode="$(stat -f '%Su:%Lp' "$KCPASSWORD" 2>/dev/null || true)"
   if [ "$(auto_login_user)" != "$me" ] || [ "$kc_mode" != "root:600" ]; then
-    fail "读回检查未通过：自动登录账户是「$(auto_login_user)」（应为 ${me}），登录凭据 ${KCPASSWORD} 的属主和权限是「${kc_mode:-不存在}」（应为 root:600）。"
-    revoke_credential || true
-    die "已撤销，自动登录保持关闭。请保留以上输出并联系 V2CC 运营方。"
+    fail "读回检查未通过：自动登录账户是「$(auto_login_user)」（应为 ${me}），登录凭据 ${KCPASSWORD} 的属主和权限是「${kc_mode:-不存在}」（应为 root:600）。请联系 V2CC 运营方。"
+    revoke_failed_enable "$was_working"
   fi
   ok "自动登录账户：$me"
   ok "登录凭据由系统保存在 ${KCPASSWORD}（root:600）"
@@ -276,7 +319,7 @@ enable() {
   - UU远程：登录账号，打开「允许本设备被控」「开机自动启动」「防止电脑休眠」，
     在系统设置里授予「辅助功能」和「录屏与系统录音」，然后重启 UU远程 客户端；
     确认「系统设置 > 通用 > 登录项与扩展」里 UU远程 是开启的。
-  - 按 docs/test-plan.md 第二阶段重启验证。在验证通过之前，不要认为这台机器
+  - 按 docs/test-plan.md C 节阶段 2 重启验证。在验证通过之前，不要认为这台机器
     重启后能自己恢复远程连接。
 关闭自动登录：./auto-login.sh disable
 EOF

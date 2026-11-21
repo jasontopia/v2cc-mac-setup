@@ -88,6 +88,19 @@ EOF
   fi
 }
 
+# check_power SETTING VALUE SKIPPED PASSED FAILED: one power setting. The
+# activation (modules/always-on.sh) skips a setting this Mac does not have,
+# so here it is reported as skipped, not as a failure.
+check_power() {
+  if ! pm_supported "$1"; then
+    warn "$3"
+  elif pm_is "$1" "$2"; then
+    pass "$4"
+  else
+    flunk "${5}：pmset $1 应为 ${2}，当前 $(pm_show "$1")"
+  fi
+}
+
 # The always-on settings are machine-wide and are applied when a deploy
 # activates, not continuously: if someone changes one in System Settings
 # afterwards, this is where it shows.
@@ -99,23 +112,18 @@ check_always_on() {
     return 0
   fi
 
-  if pm_is sleep 0; then
-    pass "系统空闲时不会自动睡眠（显示器仍按原设置自动关闭）"
-  else
-    flunk "系统空闲时仍会自动睡眠：pmset sleep 应为 0，当前 $(pm_show sleep)"
-  fi
-  if pm_is autorestart 1; then
-    pass "断电后恢复供电时自动开机"
-  else
-    flunk "断电后恢复供电时不会自动开机：pmset autorestart 应为 1，当前 $(pm_show autorestart)"
-  fi
-  if ! pm_supported womp; then
-    warn "本机没有「唤醒以供网络访问」这项设置，已跳过。"
-  elif pm_is womp 1; then
-    pass "唤醒以供网络访问已开启"
-  else
-    flunk "唤醒以供网络访问未开启：pmset womp 应为 1，当前 $(pm_show womp)"
-  fi
+  check_power sleep 0 \
+    "本机没有「系统空闲时自动睡眠」这项设置，已跳过。" \
+    "系统空闲时不会自动睡眠（显示器仍按原设置自动关闭）" \
+    "系统空闲时仍会自动睡眠"
+  check_power autorestart 1 \
+    "本机没有「断电后恢复供电时自动开机」这项设置，已跳过：部署无法让本机在断电恢复供电后自己开机，./auto-login.sh enable 在本机也因此不可用。" \
+    "断电后恢复供电时自动开机" \
+    "断电后恢复供电时不会自动开机"
+  check_power womp 1 \
+    "本机没有「唤醒以供网络访问」这项设置，已跳过。" \
+    "唤醒以供网络访问已开启" \
+    "唤醒以供网络访问未开启"
 
   value="$(sys_default "$GLOBAL_PREFS" "$AUTOLOGOUT_KEY")"
   if [ -z "$value" ] || [ "$value" = "0" ]; then
@@ -125,10 +133,13 @@ check_always_on() {
   fi
 
   value="$(sys_default "$SOFTWARE_UPDATE_PREFS" "$UPDATE_INSTALL_KEY")"
+  # Only the switch can be read. What it does to a pending update is not
+  # known until it has been watched on a real machine.
   if [ "$value" = "0" ]; then
-    pass "macOS 更新不会在无人确认时自动安装和重启（需要在维护时段由人安装）"
+    pass "「自动安装 macOS 更新」的开关已关闭（更新要在维护时段由人安装）"
+    note "这个开关在 macOS 27 上能否挡住更新自动安装和重启，尚未在真机验证（docs/test-plan.md C 节阶段 4 的 4.2）。"
   else
-    flunk "macOS 更新仍会自动安装并重启：${UPDATE_INSTALL_KEY} 应为 0，当前 ${value:-未设置}"
+    flunk "「自动安装 macOS 更新」的开关没有关闭：${UPDATE_INSTALL_KEY} 应为 0，当前 ${value:-未设置}"
   fi
   # Left alone by the deploy. Off means the machine no longer hears about
   # updates or no longer gets security data: worth saying, not ours to fix.
@@ -200,7 +211,7 @@ report_restart_state() {
     note "UU远程 在当前登录会话中：未加载。"
   fi
   note "UU远程 的登录状态、「允许本设备被控」「开机自动启动」和「辅助功能」「录屏与系统录音」权限无法由脚本读取，需人工确认。"
-  note "登录窗口或锁屏状态下 UU远程 能否无人值守连接，尚未在真机验证（docs/test-plan.md 第二阶段）。"
+  note "登录窗口或锁屏状态下 UU远程 能否无人值守连接，尚未在真机验证（docs/test-plan.md C 节阶段 2）。"
   note "上次开机：$(sysctl -n kern.boottime 2>/dev/null | sed 's/^.*} //')"
 }
 

@@ -19,6 +19,10 @@
 # settings by this line (sys_declares_always_on in lib/always-on.sh).
 echo "v2cc always-on: machine-wide settings..." >&2
 
+# The power settings this Mac has, one name per line. One it does not have
+# is neither recorded nor written.
+v2cc_power_caps="$(pmset -g cap)"
+
 # What this Mac had before the first always-on activation. Rolling back the
 # Nix generation does not undo the settings below: they live in macOS, not
 # in the Nix store. ./rollback.sh puts these values back and then renames
@@ -34,6 +38,10 @@ if [ ! -e /var/db/v2cc/always-on-before.txt ]; then
       /^Battery Power:/ { src = "b"; next }
       /^AC Power:/ { src = "c"; next }
       /^UPS Power:/ { src = "u"; next }
+      ($1 == "sleep" || $1 == "autorestart" || $1 == "womp") && (src == "" || NF != 2 || $2 !~ /^[0-9]+$/) {
+        print "unreadable=" $0
+        next
+      }
       src != "" && NF == 2 && ($1 == "sleep" || $1 == "autorestart" || $1 == "womp") {
         print "pmset." src "." $1 "=" $2
       }'
@@ -41,18 +49,39 @@ if [ ! -e /var/db/v2cc/always-on-before.txt ]; then
     echo "macos-update-install=$(defaults read /Library/Preferences/com.apple.SoftwareUpdate AutomaticallyInstallMacOSUpdates 2>/dev/null || echo absent)"
   } >/var/db/v2cc/always-on-before.txt.tmp
   # Nothing is changed unless the current power settings could be read:
-  # without them there would be nothing to restore.
+  # without them there would be nothing to restore. That holds for every
+  # one of them: a setting this Mac has but whose value is not in the record
+  # would be changed below and never put back, and ./rollback.sh would not
+  # even notice. The awk above marks a line it cannot record; a setting with
+  # no line at all is marked here.
   if ! grep -q '^pmset\.' /var/db/v2cc/always-on-before.txt.tmp; then
     rm -f /var/db/v2cc/always-on-before.txt.tmp
     echo "v2cc always-on: could not read the current power settings (pmset -g custom); nothing was changed" >&2
     exit 1
   fi
+  for v2cc_setting in sleep autorestart womp; do
+    if grep -qx "[[:space:]]*$v2cc_setting" <<<"$v2cc_power_caps" &&
+      ! grep -q "^pmset\.[bcu]\.$v2cc_setting=" /var/db/v2cc/always-on-before.txt.tmp; then
+      echo "unreadable=$v2cc_setting (this Mac has the setting, but no value was read for it)" >>/var/db/v2cc/always-on-before.txt.tmp
+    fi
+  done
+  if grep '^unreadable=' /var/db/v2cc/always-on-before.txt.tmp >&2; then
+    rm -f /var/db/v2cc/always-on-before.txt.tmp
+    echo "v2cc always-on: could not read every current power setting listed above (pmset -g custom); nothing was changed" >&2
+    exit 1
+  fi
   mv /var/db/v2cc/always-on-before.txt.tmp /var/db/v2cc/always-on-before.txt
 fi
 
+# deploy.sh, verify.sh and rollback.sh read the record without root, from
+# any account. The activation inherits the umask of the account that
+# deploys, so the modes are set outright, on every activation: a record
+# left unreadable by an earlier one is repaired here.
+chmod 755 /var/db/v2cc
+chmod 644 /var/db/v2cc/always-on-before.txt
+
 # A power setting this Mac does not have is skipped rather than failing the
-# whole activation. verify.sh then reports it.
-v2cc_power_caps="$(pmset -g cap)"
+# whole activation. verify.sh then reports it as skipped.
 v2cc_pmset() {
   if grep -qx "[[:space:]]*$1" <<<"$v2cc_power_caps"; then
     pmset -a "$1" "$2"
@@ -72,8 +101,10 @@ v2cc_pmset womp 1
 # Idle auto-logout off. 0 means off; macOS's own default is no key at all.
 defaults write /Library/Preferences/.GlobalPreferences com.apple.autologout.AutoLogOutDelay -int 0
 
-# Do not install macOS updates unattended, so an update never restarts the
-# Mac by itself. Updates are installed by a person in a planned maintenance
-# window. Checking for updates, their notifications, and the automatic
+# Turn off the switch for installing macOS updates unattended. The aim is
+# that an update never restarts the Mac by itself and that a person installs
+# updates in a planned maintenance window. Whether this switch alone holds
+# updates back on macOS 27 is not verified until docs/test-plan.md, section
+# C, step 4.2. Checking for updates, their notifications, and the automatic
 # security data and background security updates are not touched.
 defaults write /Library/Preferences/com.apple.SoftwareUpdate AutomaticallyInstallMacOSUpdates -bool false

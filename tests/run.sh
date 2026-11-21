@@ -21,6 +21,25 @@ out="$(LC_ALL=en_US.UTF-8 perl -CSD -ne \
 assert_eq "$out" ""
 end_test
 
+# The scripts and the README send people to a stage of section C of the test
+# plan. The stage has to exist under that name.
+begin_test "lint: every reference to a stage of the test plan names one that exists"
+grep -q '^## C\. ' "$REPO_ROOT/docs/test-plan.md" || flunk_test "the test plan has no section C"
+stages="$(grep -ohE 'C 节阶段 [0-9]+' "$REPO_ROOT"/*.sh "$REPO_ROOT"/lib/*.sh \
+  "$REPO_ROOT"/modules/*.sh "$REPO_ROOT"/README.md | sort -u)"
+[ -n "$stages" ] || flunk_test "no reference to a stage of section C was found"
+while IFS= read -r stage; do
+  grep -q "^### 阶段 ${stage##* } - " "$REPO_ROOT/docs/test-plan.md" ||
+    flunk_test "no heading in the test plan for: $stage"
+done <<<"$stages"
+# The scripts need the stage; the README may point to the section as a whole.
+out="$(grep -n 'test-plan\.md' "$REPO_ROOT"/*.sh "$REPO_ROOT"/lib/*.sh | grep -v 'C 节阶段 [0-9]\|section C, 阶段 [0-9]')"
+assert_eq "$out" ""
+out="$(grep -ln '第二阶段\|第 2 阶段' "$REPO_ROOT"/*.sh "$REPO_ROOT"/lib/*.sh "$REPO_ROOT"/modules/*.sh \
+  "$REPO_ROOT"/README.md "$REPO_ROOT"/docs/*.md)"
+assert_eq "$out" ""
+end_test
+
 # ---------------------------------------------------------------- blank Mac
 
 begin_test "blank Mac: one command installs everything, deploys and verifies"
@@ -613,7 +632,10 @@ assert_out "✓ 系统空闲时不会自动睡眠"
 assert_out "✓ 断电后恢复供电时自动开机"
 assert_out "✓ 唤醒以供网络访问已开启"
 assert_out "✓ 闲置后不会自动退出登录"
-assert_out "✓ macOS 更新不会在无人确认时自动安装和重启"
+# Only the switch is reported as a fact; its effect is not claimed.
+assert_out "✓ 「自动安装 macOS 更新」的开关已关闭"
+assert_out "这个开关在 macOS 27 上能否挡住更新自动安装和重启，尚未在真机验证（docs/test-plan.md C 节阶段 4 的 4.2）"
+assert_no_out "不会在无人确认时自动安装和重启"
 assert_out "✓ 启用前的原值已记录"
 assert_out "验证通过"
 end_test
@@ -640,7 +662,9 @@ assert_rc 0
 assert_out "当前系统管理的账户、服务和命令在新配置中全部保留"
 assert_out "软件包没有增加、减少或版本变化"
 assert_out "本次切换会启用 7×24 在线设置。它们对整机生效，机主的账户同样受影响"
-assert_out "macOS 更新不再自动安装和重启"
+assert_out "关闭「自动安装 macOS 更新」的开关，更新改为在维护时段由人安装"
+assert_out "能否挡住自动安装和重启，尚未在真机验证，见 docs/test-plan.md C 节阶段 4 的 4.2"
+assert_no_out "不再自动安装和重启"
 assert_out "[演练] 将把系统切换到 $(system_path coexist-on)（未执行）"
 assert_not_called '^sudo'
 assert_not_called '^activate'
@@ -817,6 +841,94 @@ assert_missing "$(before_file)"
 assert_eq "$(link_target "$SB/root/run/current-system")" "$(system_path coexist)"
 end_test
 
+begin_test "always-on: a power setting whose current value cannot be read stops the activation before any change"
+existing_machine
+# The Mac has the sleep setting, but no value is shown for it. The other two
+# are readable, which used to be enough.
+printf 'c %s\n' 'displaysleep 10' 'womp 1' 'autorestart 0' >"$SB/state/pmset"
+RUN_ENV="V2CC_ASSUME_YES=1"
+run deploy.sh
+assert_rc_nonzero
+assert_out "unreadable=sleep"
+assert_out "could not read every current power setting"
+assert_out "nothing was changed"
+assert_not_called '^pmset -[abcu]'
+assert_not_called '^defaults write'
+assert_missing "$(before_file)"
+assert_missing "$(before_file).tmp"
+assert_eq "$(link_target "$SB/root/run/current-system")" "$(system_path coexist)"
+# A value that is not a number could not be put back either.
+printf 'c %s\n' 'displaysleep 10' 'womp 1' 'sleep never' 'autorestart 0' >"$SB/state/pmset"
+: >"$SB/calls.log"
+RUN_ENV="V2CC_ASSUME_YES=1"
+run deploy.sh
+assert_rc_nonzero
+assert_out "unreadable= sleep"
+assert_not_called '^pmset -[abcu]'
+assert_not_called '^defaults write'
+assert_missing "$(before_file)"
+assert_eq "$(pmset_state autorestart)/$(pmset_state womp)" "0/1"
+# One power source readable and another not is not enough: pmset -a writes both.
+printf '%s\n' 'c womp 1' 'c sleep 1' 'c autorestart 0' 'u womp 0' 'u sleep never' 'u autorestart 0' >"$SB/state/pmset"
+: >"$SB/calls.log"
+RUN_ENV="V2CC_ASSUME_YES=1"
+run deploy.sh
+assert_rc_nonzero
+assert_out "unreadable= sleep"
+assert_not_called '^pmset -[abcu]'
+assert_missing "$(before_file)"
+# Once every value can be read, the same deploy goes through.
+printf 'c %s\n' 'displaysleep 10' 'womp 1' 'sleep 1' 'autorestart 0' >"$SB/state/pmset"
+RUN_ENV="V2CC_ASSUME_YES=1"
+run deploy.sh
+assert_rc 0
+assert_eq "$(grep -c '^unreadable' "$(before_file)")" "0"
+assert_eq "$(pmset_state sleep)/$(pmset_state autorestart)" "0/1"
+end_test
+
+begin_test "always-on: the record is readable by every account whatever the umask of the deploying account"
+RUN_UMASK=077
+run bootstrap.sh
+assert_rc 0
+assert_eq "$(mode_of "$SB/root/var/db/v2cc")/$(mode_of "$(before_file)")" "755/644"
+assert_out "✓ 启用前的原值已记录"
+# A record that an earlier activation left unreadable is repaired by the next one.
+chmod 600 "$(before_file)"
+chmod 700 "$SB/root/var/db/v2cc"
+make_system fresh-next v2cc "v2cc=gen-v2cc" extra-tool
+add_always_on fresh-next
+system_path fresh-next >"$SB/state/new_system"
+RUN_UMASK=077
+RUN_ENV="V2CC_ASSUME_YES=1"
+run deploy.sh
+assert_rc 0
+assert_called '^activate fresh-next$'
+assert_eq "$(mode_of "$SB/root/var/db/v2cc")/$(mode_of "$(before_file)")" "755/644"
+end_test
+
+begin_test "always-on: a Mac without restart after a power failure has that setting skipped, not failed"
+printf 'c %s\n' 'displaysleep 10' 'womp 1' 'sleep 1' >"$SB/state/pmset"
+printf '%s\n' displaysleep sleep womp >"$SB/state/pmset_caps"
+run bootstrap.sh
+assert_rc 0
+assert_out "this Mac has no 'autorestart' power setting, skipped"
+assert_not_called '^pmset -a autorestart'
+assert_eq "$(grep -c 'autorestart' "$(before_file)")" "0"
+assert_out "! 本机没有「断电后恢复供电时自动开机」这项设置，已跳过"
+assert_no_out "✗"
+assert_out "✓ 系统空闲时不会自动睡眠"
+assert_out "验证通过"
+assert_out "V2CC 部署完成"
+run verify.sh
+assert_rc 0
+# It is still a failure on a Mac that has the setting.
+printf '%s\n' displaysleep sleep womp autorestart >"$SB/state/pmset_caps"
+printf 'c %s\n' 'displaysleep 10' 'womp 1' 'sleep 0' 'autorestart 0' >"$SB/state/pmset"
+run verify.sh
+assert_rc 1
+assert_out "✗ 断电后恢复供电时不会自动开机：pmset autorestart 应为 1，当前 c=0"
+end_test
+
 begin_test "always-on: a Mac without wake for network access is not failed for it"
 printf 'c %s\n' 'displaysleep 10' 'sleep 1' 'autorestart 0' >"$SB/state/pmset"
 printf '%s\n' displaysleep sleep autorestart >"$SB/state/pmset_caps"
@@ -838,7 +950,8 @@ run verify.sh
 assert_rc 1
 assert_out "✗ 系统空闲时仍会自动睡眠：pmset sleep 应为 0，当前 c=15"
 assert_out "✗ 闲置 900 秒后会自动退出登录"
-assert_out "✗ macOS 更新仍会自动安装并重启"
+assert_out "✗ 「自动安装 macOS 更新」的开关没有关闭：$UPDATE_INSTALL 应为 0，当前 1"
+assert_no_out "仍会自动安装并重启"
 assert_out "! 软件更新的 CriticalUpdateInstall 已被关闭"
 assert_out "验证未通过：3 项失败"
 end_test
@@ -1113,9 +1226,83 @@ auto_login_machine
 : >"$SB/state/autologin_set_fails"
 enable_auto_login
 assert_rc_nonzero
-assert_out "系统工具没有完成自动登录的设置，已撤销"
+assert_out "系统工具没有完成自动登录的设置"
+assert_out "已撤销，自动登录保持关闭"
 assert_missing "$(kcpassword_file)"
 assert_missing "$(marker_file)"
+end_test
+
+begin_test "auto-login: a rerun that the system tool refuses leaves the working automatic login as it was"
+auto_login_machine
+enable_auto_login --lock-after-login
+assert_rc 0
+marker_before="$(cat "$(marker_file)")"
+: >"$SB/state/autologin_set_fails"
+: >"$SB/calls.log"
+enable_auto_login
+assert_rc_nonzero
+assert_out "系统工具没有完成自动登录的设置"
+assert_out "本机此前已经开启的自动登录原样保留，没有被改动"
+assert_out "自动登录账户仍是 v2cc"
+assert_no_out "已撤销"
+assert_no_out "保持关闭"
+assert_not_called 'sysadminctl -autologin off'
+assert_not_called '^sudo (rm|defaults delete)'
+assert_exists "$(kcpassword_file)"
+assert_eq "$(default_state $LOGIN_PREFS autoLoginUser)" "v2cc"
+assert_eq "$(cat "$(marker_file)")" "$marker_before"
+assert_exists "$(lock_agent_file)"
+run verify.sh
+assert_rc 0
+assert_out "✓ 重启后自动登录账户 v2cc"
+end_test
+
+begin_test "auto-login: a rerun that fails after replacing the stored password turns automatic login off and says so"
+auto_login_machine
+enable_auto_login
+assert_rc 0
+: >"$SB/state/autologin_set_fails_late"
+enable_auto_login
+assert_rc_nonzero
+assert_out "系统工具没有完成自动登录的设置"
+assert_out "已撤销。本机此前已经开启的自动登录也因此关闭了"
+assert_out "现在自动登录是关闭的，下次重启会停在登录窗口"
+assert_no_out "保持关闭"
+assert_no_out "原样保留"
+assert_called '^sudo sysadminctl -autologin off$'
+assert_missing "$(kcpassword_file)"
+assert_eq "$(default_state $LOGIN_PREFS autoLoginUser)" "absent"
+# The machine is still registered as one that logs in by itself, so verify
+# keeps saying that it no longer does.
+run verify.sh
+assert_rc 1
+assert_out "✗ 本机登记为自动登录账户 v2cc，但系统当前的自动登录账户是「无」"
+end_test
+
+begin_test "auto-login: a failed enable that cannot be undone says the state is uncertain, not that it is off"
+auto_login_machine
+enable_auto_login
+assert_rc 0
+: >"$SB/state/autologin_set_fails_late"
+: >"$SB/state/kcpassword_sticks"
+chmod 555 "$SB/root/etc"
+enable_auto_login
+chmod 755 "$SB/root/etc"
+assert_rc_nonzero
+assert_out "直接删除也没有成功"
+assert_out "撤销没有成功"
+assert_out "当前状态不确定"
+assert_no_out "已撤销"
+assert_no_out "已直接删除"
+assert_exists "$(kcpassword_file)"
+end_test
+
+begin_test "auto-login: the marker is readable by every account whatever the umask of the account enabling it"
+auto_login_machine
+RUN_UMASK=077
+enable_auto_login
+assert_rc 0
+assert_eq "$(mode_of "$SB/root/var/db/v2cc")/$(mode_of "$(marker_file)")" "755/644"
 end_test
 
 begin_test "auto-login: lock after login is a login item, added and removed by enable"

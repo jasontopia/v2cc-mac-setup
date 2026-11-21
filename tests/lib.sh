@@ -312,7 +312,9 @@ case "$1 $2" in
     [ ! -e "$SB/state/autologin_set_fails" ] || { say "Could not set automatic login."; exit 1; }
     mkdir -p "$login" "$SB/root/etc"
     [ -e "$SB/state/autologin_set_incomplete" ] || echo "$4" >"$login/autoLoginUser"
-    echo "stub-obfuscated" >"$SB/root/etc/kcpassword" ;;
+    echo "stub-obfuscated" >"$SB/root/etc/kcpassword"
+    # Failing only after the stored credential has already been replaced.
+    [ ! -e "$SB/state/autologin_set_fails_late" ] || { say "Could not finish setting automatic login."; exit 1; } ;;
   "-autologin off")
     [ "${STUB_AS_ROOT:-}" = 1 ] || { say "Operation is not permitted without authentication."; exit 1; }
     rm -f "$login/autoLoginUser"
@@ -475,20 +477,27 @@ have_claude() {
 
 # run SCRIPT [ARGS...]: run one of the sandboxed scripts with a clean
 # environment and no terminal. Extra environment goes in RUN_ENV; RUN_PATH
-# is put in front of PATH, as a terminal window that already has it would.
+# is put in front of PATH, as a terminal window that already has it would;
+# RUN_UMASK is the umask of the account running it, when not the usual one.
 RUN_ENV=""
 RUN_PATH=""
+RUN_UMASK=""
 run() {
   local script="$1"
   shift
   # shellcheck disable=SC2086
-  out="$(env -i PATH="$RUN_PATH$SB/bin:/usr/bin:/bin:/usr/sbin:/sbin" HOME="$SB/home" \
-    V2CC_SYSROOT="$SB/root" LC_ALL=en_US.UTF-8 $RUN_ENV \
-    /bin/bash "$SB/repo/$script" "$@" 2>&1 </dev/null)"
+  out="$([ -z "$RUN_UMASK" ] || umask "$RUN_UMASK"
+    env -i PATH="$RUN_PATH$SB/bin:/usr/bin:/bin:/usr/sbin:/sbin" HOME="$SB/home" \
+      V2CC_SYSROOT="$SB/root" LC_ALL=en_US.UTF-8 $RUN_ENV \
+      /bin/bash "$SB/repo/$script" "$@" 2>&1 </dev/null)"
   rc=$?
   RUN_ENV=""
   RUN_PATH=""
+  RUN_UMASK=""
 }
+
+# The permission bits of a file or directory, as the real stat sees them.
+mode_of() { /usr/bin/stat -f '%Lp' "$1" 2>/dev/null; }
 
 # run_tty SCRIPT [ARGS...] with TTY_DIALOG="prompt=answer|prompt=answer": the
 # same, but on a real terminal, typing each answer when its prompt appears.
@@ -513,7 +522,8 @@ run_tty() {
       send \"\\r\""
   done
   IFS="$old_ifs"
-  out="$(LC_ALL=en_US.UTF-8 /usr/bin/expect -c "
+  out="$([ -z "$RUN_UMASK" ] || umask "$RUN_UMASK"
+    LC_ALL=en_US.UTF-8 /usr/bin/expect -c "
     set timeout 20
     if {[catch {
       spawn -noecho env -i PATH=$SB/bin:/usr/bin:/bin:/usr/sbin:/sbin HOME=$SB/home \
@@ -524,6 +534,7 @@ run_tty() {
     } problem]} { puts \$problem; exit 99 }" 2>&1 </dev/null)"
   rc=$?
   RUN_ENV=""
+  RUN_UMASK=""
   TTY_DIALOG=""
 }
 

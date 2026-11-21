@@ -12,6 +12,8 @@ cd "$(dirname "$0")" || exit 1
 . ./lib/common.sh
 # shellcheck source=lib/system-guard.sh
 . ./lib/system-guard.sh
+# shellcheck source=lib/always-on.sh
+. ./lib/always-on.sh
 
 use_nix_and_brew_path
 
@@ -86,6 +88,122 @@ EOF
   fi
 }
 
+# The always-on settings are machine-wide and are applied when a deploy
+# activates, not continuously: if someone changes one in System Settings
+# afterwards, this is where it shows.
+check_always_on() {
+  local value key
+  info "检查 7×24 在线设置（整机生效，对所有账户相同）..."
+  if ! sys_declares_always_on "$current_system"; then
+    warn "当前系统配置不包含 7×24 在线设置（部署的是更早的版本）。重新运行 ./bootstrap.sh 后才会启用。"
+    return 0
+  fi
+
+  if pm_is sleep 0; then
+    pass "系统空闲时不会自动睡眠（显示器仍按原设置自动关闭）"
+  else
+    flunk "系统空闲时仍会自动睡眠：pmset sleep 应为 0，当前 $(pm_show sleep)"
+  fi
+  if pm_is autorestart 1; then
+    pass "断电后恢复供电时自动开机"
+  else
+    flunk "断电后恢复供电时不会自动开机：pmset autorestart 应为 1，当前 $(pm_show autorestart)"
+  fi
+  if ! pm_supported womp; then
+    warn "本机没有「唤醒以供网络访问」这项设置，已跳过。"
+  elif pm_is womp 1; then
+    pass "唤醒以供网络访问已开启"
+  else
+    flunk "唤醒以供网络访问未开启：pmset womp 应为 1，当前 $(pm_show womp)"
+  fi
+
+  value="$(sys_default "$GLOBAL_PREFS" "$AUTOLOGOUT_KEY")"
+  if [ -z "$value" ] || [ "$value" = "0" ]; then
+    pass "闲置后不会自动退出登录"
+  else
+    flunk "闲置 ${value} 秒后会自动退出登录（应为关闭）"
+  fi
+
+  value="$(sys_default "$SOFTWARE_UPDATE_PREFS" "$UPDATE_INSTALL_KEY")"
+  if [ "$value" = "0" ]; then
+    pass "macOS 更新不会在无人确认时自动安装和重启（需要在维护时段由人安装）"
+  else
+    flunk "macOS 更新仍会自动安装并重启：${UPDATE_INSTALL_KEY} 应为 0，当前 ${value:-未设置}"
+  fi
+  # Left alone by the deploy. Off means the machine no longer hears about
+  # updates or no longer gets security data: worth saying, not ours to fix.
+  for key in AutomaticCheckEnabled CriticalUpdateInstall ConfigDataInstall; do
+    if [ "$(sys_default "$SOFTWARE_UPDATE_PREFS" "$key")" = "0" ]; then
+      warn "软件更新的 ${key} 已被关闭（不是本部署改的）。建议在「系统设置 > 通用 > 软件更新 > 自动更新」里重新打开检查更新和安全数据的自动安装。"
+    fi
+  done
+
+  if [ -r "$ALWAYS_ON_BEFORE" ]; then
+    pass "启用前的原值已记录，可用 ./rollback.sh 恢复（${ALWAYS_ON_BEFORE}）"
+  else
+    flunk "没有找到启用前的原值记录（${ALWAYS_ON_BEFORE}），这些设置无法自动恢复"
+  fi
+}
+
+# What a restart means on this machine. Mostly information: whether the
+# disk unlocks by itself and whether anyone is logged in afterwards decide
+# if a remote-desktop tool can come back without a person.
+report_restart_state() {
+  local login_user marker_user lock_agent
+  info "重启后会发生什么（取决于 FileVault 和自动登录）..."
+  login_user="$(auto_login_user)"
+  marker_user="$(auto_login_marker user)"
+
+  if filevault_is_off; then
+    note "FileVault 已关闭：重启后不会停在磁盘解锁界面。"
+  else
+    note "FileVault 没有关闭（系统的回答：$(filevault_status)）：重启后需要有人在机器旁输入密码才能继续启动，在此之前任何远程软件都连不上。"
+  fi
+
+  if [ -n "$marker_user" ]; then
+    if ! filevault_is_off; then
+      flunk "本机登记为自动登录账户 ${marker_user}，但 FileVault 没有关闭，自动登录不会生效"
+    elif [ "$login_user" != "$marker_user" ]; then
+      flunk "本机登记为自动登录账户 ${marker_user}，但系统当前的自动登录账户是「${login_user:-无}」"
+    elif [ ! -e "$KCPASSWORD" ]; then
+      flunk "本机登记为自动登录账户 ${marker_user}，但保存的登录凭据（${KCPASSWORD}）不存在"
+    else
+      pass "重启后自动登录账户 ${marker_user}（由 auto-login.sh 于 $(auto_login_marker enabled) 设置）"
+    fi
+    lock_agent="$(auto_login_marker lock_agent)"
+    if [ -z "$lock_agent" ]; then
+      note "登录后不会自动锁屏：重启后桌面处于已解锁状态。"
+    elif [ "$marker_user" != "$me" ]; then
+      # Another account's ~/Library cannot be looked into from here.
+      note "登录后立即锁屏的登录项在账户 ${marker_user} 的目录里，从当前账户无法检查。"
+    elif [ -e "$lock_agent" ]; then
+      note "登录后立即关闭显示器并锁屏的登录项已安装（是否生效、锁屏后 UU远程 能否连接，尚未在真机验证）。"
+    else
+      flunk "本机登记为登录后立即锁屏，但登录项文件不存在：$lock_agent"
+    fi
+  elif [ -n "$login_user" ]; then
+    warn "系统已开启自动登录（账户 ${login_user}），但不是通过 ./auto-login.sh 设置的。"
+  else
+    note "自动登录未启用：重启后停在登录窗口，需要有人登录后才有用户会话。"
+  fi
+
+  # Service names as observed in UU远程 4.48.1. Loaded is not the same as
+  # reachable: the permissions and the sign-in cannot be read from here.
+  if launchctl print system/com.netease.uuremote.daemon >/dev/null 2>&1; then
+    note "UU远程 系统服务：已加载。"
+  else
+    note "UU远程 系统服务：未加载（未安装，或版本不同）。"
+  fi
+  if launchctl print "gui/$(id -u)/com.netease.uuremote.agent" >/dev/null 2>&1; then
+    note "UU远程 在当前登录会话中：已加载。"
+  else
+    note "UU远程 在当前登录会话中：未加载。"
+  fi
+  note "UU远程 的登录状态、「允许本设备被控」「开机自动启动」和「辅助功能」「录屏与系统录音」权限无法由脚本读取，需人工确认。"
+  note "登录窗口或锁屏状态下 UU远程 能否无人值守连接，尚未在真机验证（docs/test-plan.md 第二阶段）。"
+  note "上次开机：$(sysctl -n kern.boottime 2>/dev/null | sed 's/^.*} //')"
+}
+
 finish() {
   if [ "$failures" -eq 0 ]; then
     info "验证通过。"
@@ -158,7 +276,10 @@ else
   check "系统命令 node" "$current_system/sw/bin/node" --version
   check "开机自动激活服务 org.nixos.activate-system" \
     launchctl print system/org.nixos.activate-system
+
+  check_always_on
 fi
+report_restart_state
 
 info "检查 Claude Code..."
 check "Claude Code 已安装" "$HOME/.local/bin/claude" --version

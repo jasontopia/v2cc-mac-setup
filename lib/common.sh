@@ -51,6 +51,8 @@ export V2CC_WINDOW_PATH
 info() { printf '==> %s\n' "$*"; }
 ok() { printf '  ✓ %s\n' "$*"; }
 warn() { printf '  ! %s\n' "$*" >&2; }
+# A fact worth knowing that is neither a pass nor a failure.
+note() { printf '  - %s\n' "$*"; }
 fail() { printf '  ✗ %s\n' "$*" >&2; }
 
 die() {

@@ -4,6 +4,8 @@
 Xcode Command Line Tools、Determinate Nix、Homebrew、nix-darwin 系统配置和
 Claude Code。本机其他账户已有的 Nix / Home Manager 配置不会被改动。
 
+从新机到手到交付验收的完整操作顺序见 [docs/ONBOARDING.md](docs/ONBOARDING.md)。
+
 ## 一条命令部署
 
 1. 机主在「系统设置 > 用户与群组」里新建一个管理员账户（例如 `v2cc`），并登录该账户。

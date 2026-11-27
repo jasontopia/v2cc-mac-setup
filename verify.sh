@@ -20,6 +20,8 @@ cd "$(dirname "$0")" || exit 1
 . ./lib/system-guard.sh
 # shellcheck source=lib/always-on.sh
 . ./lib/always-on.sh
+# shellcheck source=lib/monitor.sh
+. ./lib/monitor.sh
 
 use_nix_and_brew_path
 
@@ -299,6 +301,78 @@ check_customer_home() {
   esac
 }
 
+# The machine monitor: installed, running, writing fresh records, the hash
+# chain intact, and uploading when an upload target is configured.
+check_monitor() {
+  local last age today yesterday files upload ok_at err options
+  info "检查监测程序..."
+  if ! mon_installed; then
+    flunk "监测程序没有安装（${MON_PLIST}）。运行 ./monitor.sh install，或重新运行 ./bootstrap.sh。"
+    return 0
+  fi
+  pass "监测程序已安装（${MON_PROG}）"
+  if mon_loaded; then
+    pass "监测程序在运行（launchd 服务 $MON_LABEL 已加载）"
+  else
+    flunk "监测程序没有在运行：launchd 服务 $MON_LABEL 没有加载。在平台维护管理员账户里运行 ./monitor.sh install。"
+  fi
+  last="$(mon_status last_run_epoch)"
+  if [ -z "$last" ]; then
+    flunk "监测程序还没有写出任何记录（${MON_STATUS} 不存在）"
+  else
+    age=$(($(date -u +%s) - last))
+    if [ "$age" -le "$MON_STALE_SECONDS" ]; then
+      pass "最近一次记录在 $((age / 60)) 分钟前（序号 $(mon_status last_seq)，机器编号 $(mon_status machine)）"
+    else
+      flunk "最近一次记录在 $((age / 60)) 分钟前，超过 15 分钟：监测程序可能停了"
+    fi
+  fi
+  [ "$(mon_status rejected)" = 0 ] || [ -z "$(mon_status rejected)" ] ||
+    flunk "上一轮有 $(mon_status rejected) 条记录因为含有字段清单以外的内容没有写入"
+
+  today="$MON_RECORDS/$(date -u '+%Y-%m-%d').jsonl"
+  yesterday="$MON_RECORDS/$(date -u -r $(($(date -u +%s) - 86400)) '+%Y-%m-%d').jsonl"
+  if [ ! -r "$MON_RECORDS" ] || ! ls "$MON_RECORDS" >/dev/null 2>&1; then
+    note "记录只有管理员能读：在平台维护管理员账户里运行 ./verify.sh 才会检查哈希链。"
+  else
+    files=""
+    [ ! -r "$yesterday" ] || files="$yesterday"
+    [ ! -r "$today" ] || files="$files${files:+
+}$today"
+    options="$(mon_config DETAIL_ADDRESSES | sed 's/^1$/DETAIL_ADDRESSES/;/^0$/d'),$(mon_config DETAIL_FINGERPRINT | sed 's/^1$/DETAIL_FINGERPRINT/;/^0$/d')"
+    if [ -z "$files" ]; then
+      flunk "今天还没有记录文件（${today}）"
+    elif printf '%s\n' "$files" | tr '\n' '\0' | xargs -0 /bin/bash "$MON_PROG" check --quiet --options "$options" >/dev/null 2>&1; then
+      pass "哈希链完整，每条记录都只含字段清单里的字段（$(printf '%s\n' "$files" | wc -l | tr -d ' ') 个记录文件）"
+    else
+      flunk "记录的哈希链或字段检查没有通过。查看详情：/bin/bash \"$MON_PROG\" check $(printf '%s\n' "$files" | sed 's/.*/"&"/' | tr '\n' ' ')"
+    fi
+  fi
+
+  upload="$(mon_status upload)"
+  ok_at="$(mon_status last_upload_ok_epoch)"
+  err="$(mon_status last_upload_error)"
+  case "$upload" in
+    configured)
+      if [ -n "$ok_at" ] && [ $(($(date -u +%s) - ok_at)) -le 7200 ]; then
+        pass "记录已上传到机器外（最近一次成功：$(date -u -r "$ok_at" '+%Y-%m-%d %H:%M UTC')）"
+      else
+        flunk "记录最近 2 小时没有上传成功${err:+（最近一次失败：${err}）}"
+      fi
+      ;;
+    credential-missing)
+      flunk "已配置上传目标，但上传凭证不存在，或不是只有 root 能读：./monitor.sh configure --upload-credential"
+      ;;
+    *)
+      warn "上传目标没有配置：监测记录只保存在本机，没有传到机器外。要机主提供的东西见 docs/monitoring.md「要机主提供或决定的事」。"
+      ;;
+  esac
+  [ "$(mon_status timestamps)" = configured ] ||
+    warn "每日时间戳没有配置：记录文件的指纹没有交给时间戳服务。"
+  [ -z "$(mon_status detail_options)" ] ||
+    warn "已开启超出网站那句话的加记：$(mon_status detail_options)。只有机主决定开启时才应如此。"
+}
+
 finish() {
   if [ "$failures" -eq 0 ]; then
     info "验证通过。"
@@ -366,6 +440,7 @@ else
   check_always_on
 fi
 report_restart_state
+check_monitor
 check_customer_home
 
 check_credentials

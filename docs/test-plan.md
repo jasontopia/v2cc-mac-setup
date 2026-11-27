@@ -6,7 +6,7 @@
 
 系统切换需要单独批准。A1、B1 是演练，不改动系统，可以先做。
 
-**只在测试机上测**（Captain 之前测过的那台测试 Mac mini），不在任何已经交给客户、或客户正在使用的机器上测。从迁移的第 2 步（取消 `v2cc` 的管理员权限）起，测试机上的 `v2cc` 就是普通账户了。改动任何东西之前，先做好重要文件的备份（例如 Time Machine）。本计划不包含监控：监控程序不在本仓库这一版里，等机主定下监控范围后另开 PR。
+**只在测试机上测**（Captain 之前测过的那台测试 Mac mini），不在任何已经交给客户、或客户正在使用的机器上测。从迁移的第 2 步（取消 `v2cc` 的管理员权限）起，测试机上的 `v2cc` 就是普通账户了。改动任何东西之前，先做好重要文件的备份（例如 Time Machine）。监测程序的实测在 E 节。
 
 账户：`v2ccops` 是平台维护管理员（默认账户名，`--ops` 可改，待机主确认），系统部分、自动登录和回退都在它
 里面运行；`v2cc` 是客户的普通账户（标准用户），客户账户部分在它里面运行；机主账户
@@ -20,14 +20,14 @@
 | # | 操作 | 预期结果 | 停止条件 |
 | --- | --- | --- | --- |
 | A0 | 机主新建管理员账户 `v2ccops` 和普通账户 `v2cc`，登录 `v2ccops` | `v2ccops` 显示"管理员"，`v2cc` 显示"普通"；`id -Gn v2cc` 里没有 `admin` | 账户类型不对 |
-| A1 | 运营方运行 `tools/make-entry-command.sh --customer v2cc --dry-run`，在 `v2ccops` 的终端粘贴运行 | 显示 `[1/6]` 通过（客户账户 `v2cc` 是普通账户）；`[2/6]` 到 `[4/6]` 各显示"[演练] 将执行"，`[4/6]` 还有"安装后将把 /opt/homebrew 交给客户账户 v2cc"；结尾"演练结束，系统没有任何改动" | 下载或完整性校验失败；`[1/6]` 报错 |
+| A1 | 运营方运行 `tools/make-entry-command.sh --customer v2cc --dry-run`，在 `v2ccops` 的终端粘贴运行 | 显示 `[1/7]` 通过（客户账户 `v2cc` 是普通账户）；`[2/7]` 到 `[4/7]` 各显示"[演练] 将执行"，`[4/7]` 还有"安装后将把 /opt/homebrew 交给客户账户 v2cc"；结尾"演练结束，系统没有任何改动" | 下载或完整性校验失败；`[1/7]` 报错 |
 | A2 | 运营方运行 `tools/make-entry-command.sh --customer v2cc`，在 `v2ccops` 粘贴运行 | 要求输入 `v2ccops` 的登录密码；依次安装 CLT、Determinate Nix、Homebrew，没有其他提问 | 任何安装器失败；出现密码以外的提问 |
-| A3 | 观察 `[2/6]` | 通过 softwareupdate 安装，无弹窗；若它装不上，会弹出系统安装对话框，点"安装"后脚本自动继续 | 等待超过 60 分钟 |
-| A4 | 观察 `[4/6]` 和 `[5/6]` | "Homebrew 已交给客户账户 v2cc"；`ls -ld /opt/homebrew` 显示属主 `v2cc`、组 `staff`；"这是首次部署"，随后"系统配置已激活" | 交接失败；出现 `Unexpected files in /etc`（见下） |
-| A5 | 观察 `[6/6]` | 每项都是 ✓，结尾"验证通过"和"V2CC 系统部分部署完成" | 任何一项 ✗ |
+| A3 | 观察 `[2/7]` | 通过 softwareupdate 安装，无弹窗；若它装不上，会弹出系统安装对话框，点"安装"后脚本自动继续 | 等待超过 60 分钟 |
+| A4 | 观察 `[4/7]` 和 `[5/7]` | "Homebrew 已交给客户账户 v2cc"；`ls -ld /opt/homebrew` 显示属主 `v2cc`、组 `staff`；"这是首次部署"，随后"系统配置已激活" | 交接失败；出现 `Unexpected files in /etc`（见下） |
+| A5 | 观察 `[6/7]` 和 `[7/7]` | `[6/7]` 显示"监测程序已安装并启动"和"第一轮已完成"；`[7/7]` 每项都是 ✓（"上传目标没有配置"是提醒，不是失败），结尾"验证通过"和"V2CC 系统部分部署完成" | 任何一项 ✗ |
 | A6 | 运营方运行 `tools/make-entry-command.sh --customer-setup`，登录 `v2cc`，在它的终端粘贴运行 | 不要求任何密码；装好 Claude Code；结尾"验证通过"和"V2CC 客户账户部署完成" | 要求密码；任何一项 ✗ |
 | A7 | 在 `v2cc` 新开一个终端窗口（部署前就开着的窗口看不到 `claude`，脚本结尾会提示），运行 `claude --version`、`git --version`、`node --version`、`brew --version`、`npm config get prefix` | 都有输出；npm 的位置在 `v2cc` 的主目录里 | 新窗口里命令找不到 |
-| A8 | 在 `v2ccops` 运行 `~/v2cc-mac-setup/bootstrap.sh` | 六步全部显示"跳过""已安装"或"无需切换"；除验证外没有任何安装或切换；不要求输入密码 | 有任何重新安装或切换 |
+| A8 | 在 `v2ccops` 运行 `~/v2cc-mac-setup/bootstrap.sh` | 七步全部显示"跳过""已安装"或"无需切换"（`[6/7]` 显示"监测程序已安装、是这一版，并且在运行"）；除验证外没有任何安装或切换；不要求输入密码 | 有任何重新安装或切换 |
 | A9 | 重启，分别登录 `v2ccops` 和 `v2cc`，各运行 `~/v2cc-mac-setup/verify.sh` | 两次都是"验证通过" | 任何一项 ✗ |
 | A10 | 登录机主账户，打开终端 | 终端正常，机主的文件和设置没有变化 | 终端报错或设置变化 |
 | A11 | 在 `v2ccops` 和 `v2cc` 各运行 `~/v2cc-mac-setup/verify.sh --credentials` | "未发现遗留的 GitHub 凭据" | 报告任何凭据 |
@@ -221,3 +221,28 @@ UU远程 客户端，确认「系统设置 > 通用 > 登录项与扩展」里 U
 
 D9 不可行时，平台需要在「终端」里用 `sudo` 的维护只能由人在机器旁登录 `v2ccops` 完成
 （docs/ONBOARDING.md「五个设置问题的默认做法」第 2 项）。
+
+## E. 监测程序（docs/monitoring.md）
+
+**全部尚未在真机上测过。只在测试机上做，开始前先备份（例如 Time Machine）。**
+目标是 Captain 在测试机上一次跑通：A 节的系统部分跑完时，监测程序已经装好并在运行。
+`D` 代表 `"/Library/Application Support/V2CC/monitor"`，在终端里先运行
+`D="/Library/Application Support/V2CC/monitor"`。
+
+| # | 账户 | 操作 | 预期结果 | 停止条件 |
+| --- | --- | --- | --- | --- |
+| E1 | `v2ccops` | A2 那条命令跑完后看 `[6/7]` | "监测程序已安装并启动"、"机器编号：mac-..."、"第一轮已完成"；提醒"没有配置上传目标" | 安装失败；1 分钟内没有第一轮 |
+| E2 | `v2ccops` | `./verify.sh` | "监测程序在运行"、"最近一次记录在 0 分钟前"、"哈希链完整"；"上传目标没有配置"是 `!` 提醒 | 任何一项 ✗ |
+| E3 | `v2ccops` | 等 10 分钟，`ls -l "$D/records"`；`tail -n 1 "$D/records/$(date -u +%F).jsonl" \| plutil -p -` | 文件属主 `root`、组 `admin`；最新一条是 `routine`，序号比 E1 大；内容里没有文件内容、网址、远端地址 | 没有新记录；看到文件内容或网址 |
+| E4 | `v2ccops` | `/usr/bin/time -l /bin/bash "$D/v2cc-monitor" check "$D"/records/*.jsonl`；`sudo /usr/bin/time -l /bin/bash "$D/v2cc-monitor" run` | `check` 通过；一轮用时和内存记下来（预期几秒以内） | 一轮超过 1 分钟 |
+| E5 | `v2cc` | `launchctl bootout system/com.v2cc.monitor`；`rm /Library/LaunchDaemons/com.v2cc.monitor.plist`；`ls "$D/records"`；`echo x >> "$D/config"`；`echo x >> "$D/v2cc-monitor"` | 全部被拒绝（Operation not permitted 或 Permission denied）；之后在 `v2ccops` 里 `./verify.sh` 仍显示在运行 | 任何一项成功 |
+| E6 | `v2cc` | 运行 `python3 -m http.server 8765 --bind 0.0.0.0` 10 分钟后按 Control-C | 之后的记录里有 `"alert":"external_listen"`，程序名 `python3`（或解释器的名字）；没有任何东西被停止 | 没有告警；程序被结束 |
+| E7 | 机主 | 按 docs/monitoring.md「要机主提供或决定的事」准备测试用的桶、桶锁、只给这个桶的令牌 | 拿到上传地址、桶名、Access Key ID、Secret Access Key | 无（没有时跳过 E8、E9） |
+| E8 | `v2ccops` | `./monitor.sh configure --upload-endpoint https://<账号 ID>.r2.cloudflarestorage.com --upload-bucket <桶> --upload-credential`，按提示输入两行；2 分钟后 `./monitor.sh status`、`./verify.sh` | "记录已上传到机器外"；桶里出现 `<机器编号>/records/<日期>/<起止序号>.jsonl`，内容和本机文件对应部分一致；终端历史（`history`）里没有令牌 | 上传失败；令牌出现在任何输出、日志或历史里 |
+| E9 | 机主 | 在 R2 网页上试着删除 E8 上传的对象 | 桶锁拒绝删除 | 能删掉 |
+| E10 | `v2ccops` | `./monitor.sh configure --ots-url https://a.pool.opentimestamps.org --tsa-url https://freetsa.org/tsr`；第二天 `ls "$D/receipts"` | 有前一天的 `.ots` 和 `.tsr`，记录里有 `"kind":"daily"`，`"ots":"ok","tsa":"ok"` | 两项都是 `failed` |
+| E11 | `v2ccops` | 重启测试机，登录后等 10 分钟，`./verify.sh` | 监测程序自己恢复运行；重启前后的记录序号连续；有一条 `heartbeat_gap` 告警（停机期间） | 重启后没有运行 |
+| E12 | `v2ccops` | `./monitor.sh uninstall`，再 `./verify.sh` | 停止并删除，"本机的记录保留在..."；`verify` 报"监测程序没有安装"。恢复：`./monitor.sh install` | 删除后仍在运行 |
+
+回退：`./monitor.sh uninstall`（保留本机记录）或 `./monitor.sh uninstall --delete-records`。
+它不影响系统配置、自动登录和其他任何设置。

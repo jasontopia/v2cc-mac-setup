@@ -96,7 +96,7 @@ new_sandbox() {
     "$SB/homes/howard" "$AH" "$CH" "$SB/state" "$SB/store" "$SB/bin" "$SB/late" "$SB/repo"
   : >"$SB/calls.log"
   cp -R "$REPO_ROOT"/*.sh "$REPO_ROOT/lib" "$REPO_ROOT/tools" "$REPO_ROOT/modules" \
-    "$REPO_ROOT/flake.nix" "$SB/repo/"
+    "$REPO_ROOT/monitor" "$REPO_ROOT/flake.nix" "$SB/repo/"
 
   # A blank Apple Silicon Mac: the owner's account, the customer's standard
   # account, and the platform maintenance administrator running the setup.
@@ -114,12 +114,19 @@ new_sandbox() {
   echo "FileVault is On." >"$SB/state/filevault"
   echo immediate >"$SB/state/screenlock"
   echo "root:600" >"$SB/state/kcpassword_mode"
+  echo "root:600" >"$SB/state/credential_mode"
+  echo v2cc >"$SB/state/console_user"
+  monitor_fixtures
 
   write_stub "$SB/bin/uname" <<'EOF'
 case "$1" in -s) echo Darwin ;; -m) cat "$SB/state/arch" ;; esac
 EOF
+  # Under the sudo stub the account is root, as under the real sudo.
   # id: the current account is state/user; state/uid overrides its uid.
   write_stub "$SB/bin/id" <<'EOF'
+if [ "${STUB_AS_ROOT:-}" = 1 ]; then
+  case "$*" in -u) echo 0; exit 0 ;; -un) echo root; exit 0 ;; esac
+fi
 me="$(cat "$SB/state/user")"
 field() { awk -v n="$1" -v f="$2" '$1 == n { if (f == 2) print $2; else { for (i = 3; i <= NF; i++) printf "%s%s", $i, (i < NF ? " " : "\n") } }' "$SB/state/accounts"; }
 known() { awk -v n="$1" '$1 == n { found = 1 } END { exit !found }' "$SB/state/accounts"; }
@@ -185,13 +192,15 @@ done
 STUB_AS_ROOT=1 exec "$@"
 EOF
   write_stub "$SB/bin/curl" <<'EOF'
-dest="" url="" config_on_stdin=0 dump_headers=0
+dest="" url="" config_on_stdin=0 dump_headers=0 wfmt="" body=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -o) dest="$2"; shift ;;
     -K) [ "$2" = "-" ] && config_on_stdin=1; shift ;;
     -D) dump_headers=1; shift ;;
-    --proto) shift ;;
+    -w) wfmt="$2"; shift ;;
+    --data-binary) body="${2#@}"; shift ;;
+    --proto | -X | -H | --max-time) shift ;;
     http*) url="$1" ;;
   esac
   shift
@@ -199,6 +208,22 @@ done
 echo "curl $url" >>"$SB/calls.log"
 [ "$config_on_stdin" = 0 ] || cat >"$SB/state/curl_stdin"
 [ ! -e "$SB/state/network_down" ] || exit 6
+# The monitor's test services: an S3-compatible store that never
+# overwrites, an OpenTimestamps calendar and an RFC 3161 service.
+code() { [ -z "$wfmt" ] || printf '%s' "$1"; }
+case "$url" in
+  https://store.test/*)
+    object="$SB/state/uploads/${url#https://store.test/}"
+    if [ -e "$SB/state/upload_code" ]; then code "$(cat "$SB/state/upload_code")"
+    elif [ -e "$object" ]; then code 412
+    else mkdir -p "$(dirname "$object")" && cp "$body" "$object" && cp "$SB/state/curl_stdin" "$object.headers" && code 200
+    fi
+    exit 0 ;;
+  https://ots.test/digest)
+    cp "$body" "$SB/state/ots_digest"; printf 'OTS-ANSWER' >"$dest"; code 200; exit 0 ;;
+  https://tsa.test/tsr)
+    cp "$body" "$SB/state/tsa_request"; printf '0\202TSA-ANSWER' >"$dest"; code 200; exit 0 ;;
+esac
 case "$url" in
   https://api.github.com/*)
     [ "$dump_headers" = 1 ] &&
@@ -235,12 +260,15 @@ echo "chown $*" >>"$SB/calls.log"
 [ "${STUB_AS_ROOT:-}" = 1 ] || { echo "chown: Operation not permitted" >&2; exit 1; }
 [ "$1" = "-R" ] && shift
 [ ! -e "$SB/state/chown_fails" ] || { echo "chown: simulated failure" >&2; exit 1; }
-echo "${1%%:*}" >"$SB/state/brew_owner"
+case "$2" in */opt/homebrew) echo "${1%%:*}" >"$SB/state/brew_owner" ;; esac
 EOF
   write_stub "$SB/bin/stat" <<'EOF'
 if [ "$1" = "-f" ] && [ "$2" = "%Su" ]; then
+  case "$3" in */dev/console) cat "$SB/state/console_user"; exit 0 ;; esac
   [ -e "$3" ] || { echo "stat: $3: stat: No such file or directory" >&2; exit 1; }
   cat "$SB/state/brew_owner"
+elif [ "$1" = "-f" ] && [ "$2" = "%Su:%Lp" ] && [ "${3##*/}" = upload-credential ]; then
+  [ -e "$3" ] && cat "$SB/state/credential_mode"
 elif [ "$1" = "-f" ] && [ "$2" = "%Su:%Lp" ]; then
   # The sandbox cannot create a root-owned file; say what the test set.
   [ -e "$3" ] && cat "$SB/state/kcpassword_mode"
@@ -253,6 +281,20 @@ echo "launchctl $*" >>"$SB/calls.log"
 case "$1 $2" in
   "print system/com.netease.uuremote.daemon" | print\ gui/*/com.netease.uuremote.agent)
     [ -e "$SB/state/uuremote" ] ;;
+  # The monitor's LaunchDaemon. kickstart runs one round right away, the
+  # way launchd would, as root.
+  "print system/com.v2cc.monitor") [ -e "$SB/state/monitor_loaded" ] ;;
+  "bootstrap system")
+    [ "${STUB_AS_ROOT:-}" = 1 ] || { echo "launchctl: Bootstrap failed: 1: Operation not permitted" >&2; exit 1; }
+    [ "$3" = "$SB/root/Library/LaunchDaemons/com.v2cc.monitor.plist" ] && [ -e "$3" ] && touch "$SB/state/monitor_loaded" ;;
+  "bootout system/com.v2cc.monitor")
+    [ "${STUB_AS_ROOT:-}" = 1 ] || exit 1
+    rm -f "$SB/state/monitor_loaded" ;;
+  "kickstart -k")
+    [ "${STUB_AS_ROOT:-}" = 1 ] || exit 1
+    [ "$3" = system/com.v2cc.monitor ] && [ -e "$SB/state/monitor_loaded" ] || exit 113
+    V2CC_SYSROOT="$SB/root" /bin/bash "$SB/root/Library/Application Support/V2CC/monitor/v2cc-monitor" run \
+      >>"$SB/state/monitor_runs.log" 2>&1 ;;
   print\ *) [ -e "$SB/root/run/current-system" ] ;;
 esac
 EOF
@@ -264,6 +306,7 @@ state="$SB/state/pmset"
 case "$1" in
   -g)
     case "$2" in
+      log) cat "$SB/state/mon/pmsetlog" ;;
       custom)
         [ ! -e "$SB/state/pmset_unreadable" ] || exit 0
         for src in b c u; do
@@ -314,7 +357,11 @@ echo "fdesetup $*" >>"$SB/calls.log"
 [ "$1" = status ] && cat "$SB/state/filevault"
 EOF
   write_stub "$SB/bin/sysctl" <<'EOF'
-[ "$*" = "-n kern.boottime" ] && echo "{ sec = 1795200000, usec = 0 } Fri Nov 20 12:00:00 2026"
+case "$*" in
+  "-n kern.boottime") echo "{ sec = 1795200000, usec = 0 } Fri Nov 20 12:00:00 2026" ;;
+  "-n hw.memsize") echo 17179869184 ;;
+  *) exit 1 ;;
+esac
 EOF
   # sysadminctl: like the real one it answers through the system log format
   # on stderr, and it asks for the password itself, on the terminal. The
@@ -602,3 +649,144 @@ run_tty() {
 # A GitHub token-shaped string, assembled at run time so that no
 # token-shaped literal is ever committed.
 fake_token() { printf 'gh%s_%s' p "$(printf 'A%.0s' 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36)"; }
+
+# ------------------------------------------------------------------ monitor
+#
+# What the system tools the monitor reads say on the fake Mac. Every tool is
+# a stub that prints a file under state/mon/ and logs how it was called, so
+# tests can change what the machine "shows" and see what was asked. The
+# fixtures carry things the monitor must never record: a file path and an
+# argument marked PRIVATE-MARK, remote addresses, a hardware address, web
+# addresses and application names in log messages.
+monitor_fixtures() {
+  local m="$SB/state/mon"
+  mkdir -p "$m" "$CH/Library/LaunchAgents" "$SB/root/Library/LaunchDaemons" "$SB/root/Library/LaunchAgents"
+  printf 'PRIVATE-MARK file contents\n' >"$CH/Library/LaunchAgents/com.example.helper.plist"
+  cat >"$m/ps" <<'EOF'
+    1 root               0.1  19552 /sbin/launchd
+  210 v2cc               3.2  50000 /Users/v2cc/PRIVATE-MARK-project/bin/devserver
+  211 v2cc               0.5  20000 /Users/v2cc/.local/bin/claude
+  212 v2cc               0.1   9000 /opt/homebrew/bin/node
+  300 v2ccops            0.0   1000 /bin/zsh
+EOF
+  cat >"$m/nettop" <<'EOF'
+,bytes_in,bytes_out,
+launchd.1,0,0,
+devserver.210,1000,2000,
+claude.211,5000,6000,
+EOF
+  printf 'p210\ncdevserver\nLv2cc\nf5\nPTCP\nn*:3000\nTST=LISTEN\nf6\nPTCP\nn127.0.0.1:3001\nTST=LISTEN\nf7\nPTCP\nn192.168.1.20:52000->203.0.113.7:443\nTST=ESTABLISHED\np211\ncclaude\nLv2cc\nf8\nPTCP\nn192.168.1.20:52001->160.79.104.10:443\nTST=ESTABLISHED\np212\ncnode\nLv2cc\nf9\nPTCP\nn[2001:db8::5]:52002->[2607:6bc0::10]:443\nTST=ESTABLISHED\nf10\nUDP\nn*:5353\n' >"$m/lsof"
+  printf 'Processes: 300 total\nLoad Avg: 1.50, 1.20, 1.00 \nCPU usage: 3.31%% user, 8.27%% sys, 88.41%% idle \n' >"$m/top"
+  printf 'Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free:     1000.\nPages active:   2000.\nPages wired down:   500.\nPages occupied by compressor:  100.\n' >"$m/vm_stat"
+  printf '| |   "Device Utilization %%"=5\n' >"$m/ioreg"
+  printf 'Name Mtu Network Address Ipkts Ierrs Ibytes Opkts Oerrs Obytes Coll\nlo0 16384 <Link#1> 10 0 999 10 0 999 0\nen0 1500 <Link#11> aa:bb:cc:dd:ee:ff 100 0 123456 50 0 654321 0\n' >"$m/netstat"
+  printf '<dictionary> {\n  HTTPEnable : 0\n  FTPPassive : 1\n}\n' >"$m/scutil"
+  printf '1 extension(s)\nenabled\tactive\tteamID\tbundleID (version)\tname\t[state]\n*\t*\tW5364U7YZB\tio.tailscale.ipn.macsys.network-extension (1.104.5/101.104.5)\tTailscale Network Extension\t[activated enabled]\n' >"$m/sysext"
+  printf 'Enrolled via DEP: No\nMDM enrollment: No\n' >"$m/profiles"
+  cat >"$m/btm" <<'EOF'
+========================
+ Records for UID 502 : 7F2A
+========================
+
+ Items:
+
+ #1:
+                 UUID: 1234
+                 Name: Example Helper
+       Developer Name: Example Inc
+      Team Identifier: ABCDE12345
+                 Type: developer (0x20)
+          Disposition: [enabled, allowed, visible, notified] (0xb)
+           Identifier: com.example.helper
+                  URL: file:///Users/v2cc/PRIVATE-MARK-project/helper.plist
+      Executable Path: /Users/v2cc/PRIVATE-MARK-project/helper
+EOF
+  cat >"$m/last" <<'EOF'
+v2cc       ttys000                         Fri Nov 27 09:10   still logged in
+v2cc       console                         Fri Nov 27 09:00   still logged in
+reboot time                                Fri Nov 27 08:59
+EOF
+  : >"$m/pmsetlog"
+  cat >"$m/logshow" <<'EOF'
+{"timestamp":"2026-11-27 09:30:00.123456-0600","processImagePath":"\/usr\/libexec\/sshd-session","eventMessage":"Accepted publickey for v2cc from 198.51.100.9 port 50000 ssh2"}
+{"timestamp":"2026-11-27 09:31:00.000000-0600","processImagePath":"\/System\/Library\/Frameworks\/Security.framework\/Versions\/A\/XPCServices\/authd.xpc\/Contents\/MacOS\/authd","eventMessage":"Succeeded authorizing right 'system.preferences' by client '\/Applications\/PRIVATE-MARK.app' [1] for authorization created by '\/Applications\/PRIVATE-MARK.app' [1] (3,0) (engine 1)"}
+{"timestamp":"2026-11-27 09:32:00.000000-0600","processImagePath":"\/usr\/sbin\/sshd","eventMessage":"Opened https:\/\/example.com\/PRIVATE-MARK for v2cc"}
+EOF
+  # Who signed what, by file name; Claude Code is Anthropic's.
+  echo Q6L2SF6YDW >"$m/signer.claude"
+  echo apple >"$m/signer.launchd"
+
+  local tool
+  for tool in top vm_stat ioreg netstat scutil sfltool last; do
+    write_stub "$SB/bin/$tool" <<EOF
+echo "$tool \$*" >>"\$SB/calls.log"
+case "$tool" in
+  scutil) cat "\$SB/state/mon/scutil" ;;
+  sfltool) cat "\$SB/state/mon/btm" ;;
+  *) cat "\$SB/state/mon/$tool" ;;
+esac
+EOF
+  done
+  write_stub "$SB/bin/ps" <<'EOF'
+echo "ps $*" >>"$SB/calls.log"
+cat "$SB/state/mon/ps"
+EOF
+  write_stub "$SB/bin/nettop" <<'EOF'
+echo "nettop $*" >>"$SB/calls.log"
+cat "$SB/state/mon/nettop"
+EOF
+  # lsof -p PID -a -d txt: the executable of a process, from state/mon/exe.PID.
+  write_stub "$SB/bin/lsof" <<'EOF'
+echo "lsof $*" >>"$SB/calls.log"
+if [ "$1" = -p ]; then
+  [ -e "$SB/state/mon/exe.$2" ] && printf 'p%s\nftxt\nn%s\n' "$2" "$(cat "$SB/state/mon/exe.$2")"
+  exit 0
+fi
+cat "$SB/state/mon/lsof"
+EOF
+  write_stub "$SB/bin/systemextensionsctl" <<'EOF'
+echo "systemextensionsctl $*" >>"$SB/calls.log"
+cat "$SB/state/mon/sysext"
+EOF
+  write_stub "$SB/bin/profiles" <<'EOF'
+echo "profiles $*" >>"$SB/calls.log"
+cat "$SB/state/mon/profiles"
+EOF
+  write_stub "$SB/bin/log" <<'EOF'
+echo "log $*" >>"$SB/calls.log"
+[ "$1" = show ] && cat "$SB/state/mon/logshow"
+EOF
+  write_stub "$SB/bin/dscl" <<'EOF'
+[ "$1 $2" = ". -read" ] && [ "$4" = NFSHomeDirectory ] || exit 1
+printf 'NFSHomeDirectory: %s\n' "$SB/homes/${3#/Users/}"
+EOF
+  # codesign: the signer of a file is state/mon/signer.<file name>, if any.
+  write_stub "$SB/bin/codesign" <<'EOF'
+echo "codesign $*" >>"$SB/calls.log"
+for file; do :; done
+signer="$(cat "$SB/state/mon/signer.${file##*/}" 2>/dev/null)"
+case "$1" in
+  -dv) [ -n "$signer" ] && [ "$signer" != apple ] && echo "TeamIdentifier=$signer" >&2 || echo "TeamIdentifier=not set" >&2 ;;
+  -v)
+    [ -n "$signer" ] || exit 1
+    case "$2" in
+      "-R=anchor apple") [ "$signer" = apple ] ;;
+      -R=*) case "$2" in *"\"$signer\""*) exit 0 ;; *) exit 3 ;; esac ;;
+      *) exit 0 ;;
+    esac ;;
+esac
+EOF
+}
+
+# The monitor as installed on the fake Mac, and one round of it at a given
+# time (epoch seconds), as launchd runs it: as root.
+monitor_prog() { printf '%s' "$SB/root/Library/Application Support/V2CC/monitor/v2cc-monitor"; }
+monitor_records() { printf '%s' "$SB/root/Library/Application Support/V2CC/monitor/records"; }
+monitor_state() { printf '%s' "$SB/root/Library/Application Support/V2CC/monitor/state"; }
+monitor_round() {
+  env -i PATH="$SB/bin:/usr/bin:/bin:/usr/sbin:/sbin" HOME=/var/root V2CC_SYSROOT="$SB/root" \
+    STUB_AS_ROOT=1 V2CC_MONITOR_NOW="$1" LC_ALL=en_US.UTF-8 \
+    /bin/bash "$(monitor_prog)" run >>"$SB/state/monitor_runs.log" 2>&1
+}
+# Every record written so far, in order.
+monitor_all_records() { cat "$(monitor_records)"/*.jsonl 2>/dev/null; }

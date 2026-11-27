@@ -1,8 +1,8 @@
 # V2CC Mac mini 标准部署
 
 在一台 Apple Silicon Mac 上，为客户的普通账户（标准用户，例如 `v2cc`）装好
-Xcode Command Line Tools、Determinate Nix、Homebrew、nix-darwin 系统配置和
-Claude Code。客户账户没有管理员权限；需要管理员权限的部分由平台维护管理员账户
+Xcode Command Line Tools、Determinate Nix、Homebrew、nix-darwin 系统配置、
+监测程序和 Claude Code。客户账户没有管理员权限；需要管理员权限的部分由平台维护管理员账户
 完成。本机其他账户已有的 Nix / Home Manager 配置不会被改动。
 
 从新机到手到交付验收的完整操作顺序见 [docs/ONBOARDING.md](docs/ONBOARDING.md)。
@@ -45,7 +45,8 @@ Claude Code。客户账户没有管理员权限；需要管理员权限的部分
 | 3 | Determinate Nix（固定版本，校验 SHA-256） | 跳过 |
 | 4 | Homebrew（固定版本的官方安装脚本，校验 SHA-256），然后交给客户账户 | 已属于客户账户则跳过；属于别的账户（例如机主）时默认不动，加 `--hand-over-homebrew` 才交接 |
 | 5 | 构建系统配置（含 7×24 在线设置和客户账户的登记）、检查不影响现有账户、切换 | 已是当前系统则跳过 |
-| 6 | 部署后验证（整机部分），包括检查这个账户没有遗留 GitHub 凭据 | 每次都做 |
+| 6 | 监测程序（[docs/monitoring.md](docs/monitoring.md)）：以 root 运行、每 5 分钟记录一次，客户账户停不掉；没有配置上传目标时只在本机记录。`--machine-id` 给机器起内部编号（不给则随机生成） | 已是这一版并在运行则跳过 |
+| 7 | 部署后验证（整机部分，含监测程序在运行、记录新、哈希链完整、上传成功），包括检查这个账户没有遗留 GitHub 凭据 | 每次都做 |
 
 客户账户部分 `customer-setup.sh`（客户账户，不用 `sudo`，不要求任何密码）：
 
@@ -100,7 +101,7 @@ Claude Code。客户账户没有管理员权限；需要管理员权限的部分
   `~/.zprofile` 里的设置，也能在自己的会话里退出 UU远程 或关掉它的设置。"不删除
   平台安装的组件"对这些只能是使用规则，脚本拦不住；`./verify.sh` 能发现其中一部分。
   归 root 所有、或放在只有管理员能写的位置的部分（Nix、nix-darwin 系统配置、Xcode
-  Command Line Tools、`/Applications` 里的应用、UU远程 的系统服务、锁屏登录项）普通
+  Command Line Tools、`/Applications` 里的应用、UU远程 的系统服务、锁屏登录项、监测程序）普通
   账户删不掉。
 - Homebrew 只能属于一个账户。机主自己早已在用 `/opt/homebrew` 的机器上，部署不会
   去改它，`./verify.sh` 会报告客户不能 `brew install`，要不要交给客户由机主决定
@@ -348,8 +349,9 @@ UU远程 这类远程桌面软件在用户会话里运行。要让它在重启�
 
 ```sh
 tests/run.sh        # 桩测试：全新机器、部分安装、失败重跑、机主共存、账户角色、Homebrew 交接、客户账户、回退、凭据、入口命令、7×24 在线设置、迁移、自动登录
+tests/monitor.sh    # 桩测试：监测程序（安装、字段清单、隐私、告警、上传、哈希链、时间戳、卸载）
 tests/closures.sh   # 用真实构建的 nix-darwin 闭包检验共存检查（只构建，不激活）
-shellcheck -x *.sh lib/*.sh tools/*.sh tests/*.sh modules/*.sh
+shellcheck -x *.sh lib/*.sh tools/*.sh tests/*.sh modules/*.sh monitor/*.sh
 ```
 
 桩测试里 `sudo`、`pmset`、`defaults`、`sysadminctl`、`fdesetup`、`chown` 等全部是只碰

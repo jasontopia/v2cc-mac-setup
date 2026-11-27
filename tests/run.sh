@@ -21,7 +21,8 @@ FOR_V2CC="V2CC_CUSTOMER=v2cc"
 begin_test "lint: every variable directly before non-ASCII text is braced"
 out="$(LC_ALL=en_US.UTF-8 perl -CSD -ne \
   'print "$ARGV: $1\n" while /(\$[A-Za-z_][A-Za-z0-9_]*)(?=[^\x00-\x7F])/g' \
-  "$REPO_ROOT"/*.sh "$REPO_ROOT"/lib/*.sh "$REPO_ROOT"/tools/*.sh "$REPO_ROOT"/modules/*.sh)"
+  "$REPO_ROOT"/*.sh "$REPO_ROOT"/lib/*.sh "$REPO_ROOT"/tools/*.sh "$REPO_ROOT"/modules/*.sh \
+  "$REPO_ROOT"/monitor/*.sh)"
 assert_eq "$out" ""
 end_test
 
@@ -594,7 +595,7 @@ system_path coexist >"$SB/state/new_system"
 RUN_ENV="V2CC_ASSUME_YES=1"
 run bootstrap.sh --customer v2cc
 assert_rc 1
-assert_not_called 'chown'
+assert_not_called 'chown .*opt/homebrew'
 assert_out "Homebrew（$SB/root/opt/homebrew）属于账户 howard，不属于客户账户 v2cc"
 assert_out "M5"
 assert_out "✗ Homebrew（$SB/root/opt/homebrew）属于账户「howard」，不属于客户账户 v2cc：客户不能自己 brew install"
@@ -607,7 +608,7 @@ run bootstrap.sh --customer v2cc --hand-over-homebrew
 assert_rc_nonzero
 assert_out "将把属于账户 howard 的 Homebrew 交给客户账户 v2cc"
 assert_out "需要人工确认"
-assert_not_called 'chown'
+assert_not_called 'chown .*opt/homebrew'
 RUN_ENV="V2CC_ASSUME_YES=1"
 run bootstrap.sh --customer v2cc --hand-over-homebrew
 assert_rc 0

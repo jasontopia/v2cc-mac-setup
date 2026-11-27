@@ -6,7 +6,7 @@
 # customer's account: the customer account is a standard account without
 # administrator rights. It checks the machine, installs whatever is
 # missing, hands Homebrew to the customer account, deploys the system
-# configuration and verifies the result. Everything already in place is
+# configuration, installs the machine monitor and verifies the result. Everything already in place is
 # skipped, so it is safe to rerun after a failure.
 #
 #   ./bootstrap.sh --customer <account>            do it
@@ -15,6 +15,8 @@
 #
 #   --ops <account>        the platform maintenance administrator account
 #                          this must run in (default v2ccops, or V2CC_OPS_ACCOUNT)
+#   --machine-id <id>      the internal name the monitor records for this machine
+#                          (default: the one already configured, or a new random one)
 #   --hand-over-homebrew   also hand over a Homebrew that belongs to another
 #                          account, such as the machine owner's; only with the
 #                          owner's consent
@@ -32,12 +34,13 @@ cd "$(dirname "$0")"
 # shellcheck source=lib/system-guard.sh
 . ./lib/system-guard.sh
 
-usage="用法：./bootstrap.sh --customer <客户账户名> [--ops <运维管理员账户名>] [--hand-over-homebrew] [--dry-run]"
+usage="用法：./bootstrap.sh --customer <客户账户名> [--ops <运维管理员账户名>] [--machine-id <机器编号>] [--hand-over-homebrew] [--dry-run]"
 customer="${V2CC_CUSTOMER:-}"
 # The default name is awaiting the owner's confirmation (docs/ONBOARDING.md,
 # 「五个设置问题的默认做法」).
 ops="${V2CC_OPS_ACCOUNT:-v2ccops}"
 hand_over_foreign_brew=0
+machine_id=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) V2CC_DRY_RUN=1 ;;
@@ -52,6 +55,11 @@ while [ $# -gt 0 ]; do
       shift
       ;;
     --hand-over-homebrew) hand_over_foreign_brew=1 ;;
+    --machine-id)
+      [ $# -ge 2 ] || die "--machine-id 需要机器编号。$usage"
+      machine_id="$2"
+      shift
+      ;;
     *) die "未知参数：${1}。$usage" ;;
   esac
   shift
@@ -73,7 +81,7 @@ brew_installed() { [ -x "$BREW_PREFIX/bin/brew" ]; }
 
 step_preflight() {
   local os_major free_gb
-  info "[1/6] 检查本机环境..."
+  info "[1/7] 检查本机环境..."
 
   [ "$(uname -s)" = "Darwin" ] && [ "$(uname -m)" = "arm64" ] ||
     die "仅支持 Apple Silicon Mac。"
@@ -107,7 +115,7 @@ step_preflight() {
 
 step_clt() {
   local label waited=0
-  info "[2/6] Xcode Command Line Tools..."
+  info "[2/7] Xcode Command Line Tools..."
   if clt_installed; then
     ok "已安装，跳过。"
     return 0
@@ -149,7 +157,7 @@ step_clt() {
 
 step_nix() {
   local work_dir
-  info "[3/6] Determinate Nix..."
+  info "[3/7] Determinate Nix..."
   if nix_installed; then
     ok "已安装，跳过（$("$NIX_DEFAULT_BIN/nix" --version)）。"
     return 0
@@ -176,7 +184,7 @@ step_nix() {
 
 step_brew() {
   local work_dir
-  info "[4/6] Homebrew..."
+  info "[4/7] Homebrew..."
   if brew_installed; then
     ok "已安装。"
   elif is_dry_run; then
@@ -236,7 +244,7 @@ hand_over_brew() {
 }
 
 step_deploy() {
-  info "[5/6] 系统配置..."
+  info "[5/7] 系统配置..."
   if [ -n "$pending" ]; then
     printf '  [演练] 依赖尚未安装（%s），无法构建和检查系统配置；实际运行时会在此构建、检查并切换。\n' "${pending# }"
     return 0
@@ -244,8 +252,19 @@ step_deploy() {
   ./deploy.sh
 }
 
+# The machine monitor (monitor.sh, docs/monitoring.md): part of every setup,
+# so a new machine is fully ready after this one run.
+step_monitor() {
+  info "[6/7] 监测程序..."
+  if [ -n "$pending" ] || { is_dry_run && [ -z "$(resolve_link "$CURRENT_SYSTEM_LINK")" ]; }; then
+    printf '  [演练] 将安装并启动监测程序（launchd 服务 com.v2cc.monitor，每 5 分钟记录一次）\n'
+    return 0
+  fi
+  ./monitor.sh install ${machine_id:+--machine-id "$machine_id"}
+}
+
 step_verify() {
-  info "[6/6] 验证..."
+  info "[7/7] 验证..."
   if is_dry_run; then
     printf '  [演练] 演练模式不做部署后验证。\n'
     return 0
@@ -260,6 +279,7 @@ step_nix
 use_nix_and_brew_path
 step_brew
 step_deploy
+step_monitor
 step_verify
 
 if is_dry_run; then

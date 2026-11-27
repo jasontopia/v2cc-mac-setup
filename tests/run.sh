@@ -66,8 +66,8 @@ assert_order '^nix .* build ' '^activate fresh$'
 assert_not_called '^claude-installer'
 assert_eq "$(link_target "$SB/root/run/current-system")" "$(system_path fresh)"
 assert_eq "$(tr -d ' \n' <"$SB/repo/machine.nix" | sed 's/^#[^{]*//')" \
-  '{primaryUser="v2ccadmin";homebrewUser="v2cc";customerUser="v2cc";users=["v2cc"];}'
-assert_out "运行部署的管理员账户：v2ccadmin；客户账户（普通账户）：v2cc"
+  '{primaryUser="v2ccops";homebrewUser="v2cc";customerUser="v2cc";users=["v2cc"];}'
+assert_out "运行部署的平台维护管理员账户：v2ccops；客户账户（普通账户）：v2cc"
 assert_out "Homebrew 已交给客户账户 v2cc"
 assert_out "这是首次部署"
 assert_out "✓ 客户账户 v2cc 是普通账户（标准用户），没有管理员权限"
@@ -250,7 +250,7 @@ RUN_ENV="V2CC_ASSUME_YES=1"
 run bootstrap.sh --customer v2cc
 assert_rc 3
 assert_out "账户「howard」的 Home Manager 配置将被移除"
-assert_out "主用户 system.primaryUser 将从「howard」变为「v2ccadmin」"
+assert_out "主用户 system.primaryUser 将从「howard」变为「v2ccops」"
 assert_out "已停止，系统没有任何改动"
 grep -Fq "Home Manager 账户：howard" "$AH/.local/state/v2cc/guard-report.txt" ||
   flunk_test "guard report lacks the current accounts"
@@ -421,7 +421,7 @@ assert_not_called '.'
 end_test
 
 begin_test "preflight: refuses an account that is not an administrator"
-set_groups v2ccadmin staff
+set_groups v2ccops staff
 run bootstrap.sh --customer v2cc
 assert_rc_nonzero
 assert_out "不是管理员"
@@ -462,9 +462,9 @@ begin_test "roles: the customer must be another, existing, standard account"
 run bootstrap.sh --customer nobody
 assert_rc_nonzero
 assert_out "本机没有账户「nobody」"
-run bootstrap.sh --customer v2ccadmin
+run bootstrap.sh --customer v2ccops
 assert_rc_nonzero
-assert_out "客户账户不能是运行部署的账户 v2ccadmin"
+assert_out "客户账户不能是运行部署的账户 v2ccops"
 run bootstrap.sh --customer howard
 assert_rc_nonzero
 assert_out "客户账户「howard」是管理员"
@@ -474,6 +474,23 @@ assert_rc_nonzero
 assert_out "客户账户「v2cc」是管理员。客户账户必须是普通账户（标准用户）"
 assert_not_called '.'
 assert_missing "$SB/root/run/current-system"
+end_test
+
+begin_test "roles: the system part runs only in the ops account, v2ccops unless named otherwise"
+become howard
+run bootstrap.sh --customer v2cc
+assert_rc_nonzero
+assert_out "当前账户 howard 不是平台维护管理员账户 v2ccops"
+assert_out "加 --ops <账户名>"
+assert_not_called '.'
+run bootstrap.sh --customer v2cc --ops howard --dry-run
+assert_rc 0
+assert_out "运行部署的平台维护管理员账户：howard"
+become v2ccops
+RUN_ENV="V2CC_OPS_ACCOUNT=someone-else"
+run bootstrap.sh --customer v2cc --dry-run
+assert_rc_nonzero
+assert_out "不是平台维护管理员账户 someone-else"
 end_test
 
 begin_test "roles: the customer's standard account cannot run any step that needs administrator rights"
@@ -536,7 +553,7 @@ end_test
 begin_test "roles: changing the recorded customer is refused unless explicitly allowed; recording one is an addition"
 run bootstrap.sh --customer v2cc
 printf '%s\n' 'v2cc2 504 staff' >>"$SB/state/accounts"
-make_system other v2ccadmin "v2cc=gen-v2cc v2cc2=gen-v2cc2"
+make_system other v2ccops "v2cc=gen-v2cc v2cc2=gen-v2cc2"
 add_always_on other
 echo v2cc2 >"$(system_path other)/etc/v2cc/customer"
 system_path other >"$SB/state/new_system"
@@ -556,7 +573,7 @@ end_test
 begin_test "homebrew: one the platform account installed earlier is handed to the customer"
 have_clt
 have_nix
-have_brew v2ccadmin
+have_brew v2ccops
 run bootstrap.sh --customer v2cc
 assert_rc 0
 assert_not_called '^brew-installer'
@@ -585,12 +602,24 @@ assert_out "验证未通过：1 项失败"
 assert_eq "$(tr -d ' \n' <"$SB/repo/machine.nix" | sed 's/^#[^{]*//')" \
   '{primaryUser="howard";homebrewUser="howard";customerUser="v2cc";users=["howard""v2cc"];}'
 assert_eq "$(cat "$SB/state/brew_owner")" "howard"
+# With the owner's consent, and only then, it is handed over.
+run bootstrap.sh --customer v2cc --hand-over-homebrew
+assert_rc_nonzero
+assert_out "将把属于账户 howard 的 Homebrew 交给客户账户 v2cc"
+assert_out "需要人工确认"
+assert_not_called 'chown'
+RUN_ENV="V2CC_ASSUME_YES=1"
+run bootstrap.sh --customer v2cc --hand-over-homebrew
+assert_rc 0
+assert_called "^sudo chown -R v2cc:staff $SB/root/opt/homebrew$"
+assert_eq "$(cat "$SB/state/brew_owner")" "v2cc"
+assert_out "验证通过"
 end_test
 
 begin_test "homebrew: a dry run says it will hand over, and a failed hand-over stops before the system switch"
 have_clt
 have_nix
-have_brew v2ccadmin
+have_brew v2ccops
 run bootstrap.sh --customer v2cc --dry-run
 assert_rc 0
 assert_out "[演练] 将执行：sudo chown -R v2cc:staff $SB/root/opt/homebrew，然后 sudo chmod -R go-w $SB/root/opt/homebrew"
@@ -665,11 +694,11 @@ become v2cc
 run customer-setup.sh
 assert_rc_nonzero
 assert_out "本机还没有部署 V2CC 系统配置"
-become v2ccadmin
+become v2ccops
 run bootstrap.sh --customer v2cc
 run customer-setup.sh
 assert_rc_nonzero
-assert_out "本脚本只在客户账户 v2cc 里运行，当前账户是 v2ccadmin"
+assert_out "本脚本只在客户账户 v2cc 里运行，当前账户是 v2ccops"
 become v2cc
 set_groups v2cc "staff admin"
 run customer-setup.sh
@@ -824,12 +853,18 @@ begin_test "entry command: the platform form names the customer, the customer fo
 entry_fixture
 run tools/make-entry-command.sh --customer v2cc
 assert_rc 0
-assert_out "在本机的平台维护管理员账户的「终端」里粘贴运行"
+assert_out "在本机的平台维护管理员账户（v2ccops）的「终端」里粘贴运行"
 entry="$(printf '%s\n' "$out" | grep '/bin/bash -c ')"
 out="$(env -i PATH="$SB/bin:/usr/bin:/bin" HOME="$AH" /bin/zsh -f -c "$entry" 2>&1)"
 rc=$?
 assert_rc 0
 assert_out "bootstrap ran from $AH/v2cc-mac-setup with [--customer v2cc]"
+run tools/make-entry-command.sh --customer v2cc --ops ops2
+assert_rc 0
+assert_out "平台维护管理员账户（ops2）"
+entry="$(printf '%s\n' "$out" | grep '/bin/bash -c ')"
+out="$(env -i PATH="$SB/bin:/usr/bin:/bin" HOME="$AH" /bin/zsh -f -c "$entry" 2>&1)"
+assert_out "with [--customer v2cc --ops ops2]"
 run tools/make-entry-command.sh --dry-run --customer-setup
 assert_rc 0
 assert_out "在本机的客户的普通账户（例如 v2cc）的「终端」里粘贴运行"
@@ -845,7 +880,7 @@ assert_rc_nonzero
 assert_out "含有不支持的字符"
 run tools/make-entry-command.sh --customer-setup --customer v2cc
 assert_rc_nonzero
-assert_out "--customer-setup 不能和 --customer 一起使用"
+assert_out "--customer-setup 不能和 --customer、--ops 一起使用"
 end_test
 
 begin_test "entry command: the dry-run variant passes dry-run mode to bootstrap"
@@ -1205,7 +1240,7 @@ assert_out "✓ 启用前的原值已记录"
 # A record that an earlier activation left unreadable is repaired by the next one.
 chmod 600 "$(before_file)"
 chmod 700 "$SB/root/var/db/v2cc"
-make_system fresh-next v2ccadmin "v2cc=gen-v2cc" extra-tool
+make_system fresh-next v2ccops "v2cc=gen-v2cc" extra-tool
 add_always_on fresh-next
 system_path fresh-next >"$SB/state/new_system"
 RUN_UMASK=077

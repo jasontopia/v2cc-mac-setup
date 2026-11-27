@@ -72,10 +72,16 @@
             # Determinate Nix manages Nix itself.
             nix.enable = false;
 
+            # Preinstalled for every account, root-owned in the Nix store, so
+            # the customer cannot remove them. Python has no global pip here:
+            # packages go into a virtual environment (python3 -m venv) or
+            # through uv.
             environment.systemPackages = with pkgs; [
               git
               home-manager
               nodejs
+              python3
+              uv
             ];
 
             homebrew = {

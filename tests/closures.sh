@@ -70,7 +70,7 @@ owner="$(build owner '{ primaryUser = "howard"; homebrewUser = "howard"; custome
 coexist="$(build coexist '{ primaryUser = "howard"; homebrewUser = "howard"; customerUser = "v2cc"; users = [ "howard" "v2cc" ]; }')"
 # A blank Mac deployed from the platform maintenance administrator, which is
 # the primary user without being a managed account itself.
-customer="$(build customer '{ primaryUser = "v2ccadmin"; homebrewUser = "v2cc"; customerUser = "v2cc"; users = [ "v2cc" ]; }')"
+customer="$(build customer '{ primaryUser = "v2ccops"; homebrewUser = "v2cc"; customerUser = "v2cc"; users = [ "v2cc" ]; }')"
 printf 'owner only:       %s\nowner + customer: %s\ncustomer only:    %s\n\n' "$owner" "$coexist" "$customer"
 
 expect "owner closure: primary user and Home Manager account are read back" \
@@ -85,7 +85,7 @@ expect "adding the customer leaves the owner's Home Manager generation byte-iden
 expect "the customer account is recorded in the closure, readable as /etc/v2cc/customer" \
   test "$(sys_customer_user "$coexist")/$(sys_customer_user "$customer")/$(sys_customer_user "$owner")" = "v2cc/v2cc/"
 expect "customer only: the platform administrator is the primary user, the customer the only managed account" \
-  test "$(sys_primary_user "$customer")/$(sys_hm_users "$customer" | tr '\n' ' ')" = "v2ccadmin/v2cc "
+  test "$(sys_primary_user "$customer")/$(sys_hm_users "$customer" | tr '\n' ' ')" = "v2ccops/v2cc "
 
 expect "guard accepts owner -> owner + customer" \
   guard_compare "$owner" "$coexist"
@@ -95,7 +95,7 @@ printf '%s\n' "$refused" | sed 's/^/     | /'
 expect "guard refuses owner -> customer only: owner would be removed" \
   grep -Fq '账户「howard」的 Home Manager 配置将被移除' <<<"$refused"
 expect "guard refuses owner -> customer only: primary user would change" \
-  grep -Fq '主用户 system.primaryUser 将从「howard」变为「v2ccadmin」' <<<"$refused"
+  grep -Fq '主用户 system.primaryUser 将从「howard」变为「v2ccops」' <<<"$refused"
 
 refused="$(guard_compare "$coexist" "$owner" || true)"
 expect "guard refuses owner + customer -> owner only: customer would be removed" \
@@ -172,6 +172,23 @@ refused="$(guard_compare "$coexist" "$other" || true)"
 printf '%s\n' "$refused" | sed 's/^/     | /'
 expect "guard refuses changing the recorded customer" \
   grep -Fq '客户账户将从「v2cc」变为「howard」' <<<"$refused"
+
+# Python and uv joined the preinstalled tools after machines were deployed.
+old_tools="grep -Ev '^[[:space:]]*(python3|uv)\$' flake.nix >flake.nix.new && mv flake.nix.new flake.nix"
+without_tools="$(build without-tools "$machine" "$old_tools")"
+expect "the earlier package list has neither python3 nor uv, the current one has both" \
+  test "$(sys_bin_names "$without_tools" | grep -cxE 'python3|uv')/$(sys_bin_names "$coexist" | grep -cxE 'python3|uv')" = "0/2"
+# The aggregate of the system's packages is rebuilt, so on a machine already
+# deployed this is a deliberate upgrade: refused unless explicitly allowed,
+# and nothing else changes.
+refused="$(guard_compare "$without_tools" "$coexist" || true)"
+printf '%s\n' "$refused" | sed 's/^/     | /'
+expect "guard refuses adding python3 and uv unless changes are explicitly allowed, naming only the rebuilt package aggregates" \
+  test "$refused" = "当前系统中有 2 项内容将被移除或改变（例如：system-applications system-path ）。"
+expect "adding python3 and uv is accepted when changes are explicitly allowed" \
+  env V2CC_ALLOW_SYSTEM_CHANGES=1 /bin/bash -c ". '$repo_root/lib/system-guard.sh'; guard_compare '$without_tools' '$coexist'"
+expect "adding python3 and uv leaves both Home Manager generations byte-identical" \
+  test "$(sys_hm_generation "$without_tools" howard)/$(sys_hm_generation "$without_tools" v2cc)" = "$(sys_hm_generation "$coexist" howard)/$(sys_hm_generation "$coexist" v2cc)"
 
 # Handing the owner's Homebrew to the customer (section 15, M5) changes the
 # account the Homebrew step of the activation runs as.

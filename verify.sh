@@ -358,6 +358,8 @@ else
 
   check "系统命令 git" "$current_system/sw/bin/git" --version
   check "系统命令 node" "$current_system/sw/bin/node" --version
+  check "系统命令 python3" "$current_system/sw/bin/python3" --version
+  check "系统命令 uv" "$current_system/sw/bin/uv" --version
   check "开机自动激活服务 org.nixos.activate-system" \
     launchctl print system/org.nixos.activate-system
 

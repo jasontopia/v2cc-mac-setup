@@ -12,7 +12,7 @@ Claude Code。客户账户没有管理员权限；需要管理员权限的部分
 | 账户 | 类型 | 做什么 |
 | --- | --- | --- |
 | 机主自己的账户 | 管理员 | 机主自用，部署和日常维护都不需要它。机主在这里新建另外两个账户、关闭 FileVault；docs/ONBOARDING.md 第 15 节「迁移」里有几步要机主同意 |
-| 平台维护管理员（建议账户名 `v2ccadmin`，待定） | 管理员 | 运行 `bootstrap.sh`（部署、7×24 在线设置）、`auto-login.sh enable/disable`、`rollback.sh`，以及客户提出的需要管理员权限的安装 |
+| 平台维护管理员（运维），账户名默认 `v2ccops`（`--ops` 可改，待机主确认） | 管理员 | 运行 `bootstrap.sh`（部署、7×24 在线设置）、`auto-login.sh enable/disable`、`rollback.sh`，以及客户提出的需要管理员权限的安装 |
 | 客户账户（`v2cc`） | 普通账户（标准用户） | 客户使用的账户。运行 `customer-setup.sh`，开机自动登录进入它，UU远程 在它的会话里运行 |
 
 客户账户不能用 `sudo`。需要管理员权限的脚本在客户账户里运行时，会在做任何事之前
@@ -30,7 +30,7 @@ Claude Code。客户账户没有管理员权限；需要管理员权限的部分
    tools/make-entry-command.sh --customer-setup           # 客户账户部分
    ```
 
-3. 系统部分的那一行在平台维护管理员账户的「终端」里粘贴运行；完成后，客户账户
+3. 系统部分的那一行在平台维护管理员账户（`v2ccops`）的「终端」里粘贴运行；完成后，客户账户
    部分的那一行在客户账户的「终端」里粘贴运行。
 
 每一行命令都会下载部署包、校验 SHA-256、解压到当前账户的 `~/v2cc-mac-setup`，
@@ -40,10 +40,10 @@ Claude Code。客户账户没有管理员权限；需要管理员权限的部分
 
 | 步骤 | 内容 | 已具备时 |
 | --- | --- | --- |
-| 1 | 检查机型、系统版本、磁盘空间；运行的账户是管理员；客户账户存在、不是运行的账户、是普通账户 | 不满足则停止 |
+| 1 | 检查机型、系统版本、磁盘空间；运行的账户是管理员，并且就是平台维护管理员账户（默认 `v2ccops`，`--ops <账户名>` 可改）；客户账户存在、不是运行的账户、是普通账户 | 不满足则停止 |
 | 2 | Xcode Command Line Tools | 跳过 |
 | 3 | Determinate Nix（固定版本，校验 SHA-256） | 跳过 |
-| 4 | Homebrew（固定版本的官方安装脚本，校验 SHA-256），然后交给客户账户 | 已属于客户账户则跳过 |
+| 4 | Homebrew（固定版本的官方安装脚本，校验 SHA-256），然后交给客户账户 | 已属于客户账户则跳过；属于别的账户（例如机主）时默认不动，加 `--hand-over-homebrew` 才交接 |
 | 5 | 构建系统配置（含 7×24 在线设置和客户账户的登记）、检查不影响现有账户、切换 | 已是当前系统则跳过 |
 | 6 | 部署后验证（整机部分），包括检查这个账户没有遗留 GitHub 凭据 | 每次都做 |
 
@@ -77,11 +77,11 @@ Claude Code。客户账户没有管理员权限；需要管理员权限的部分
 
 | 操作 | 为什么可以 |
 | --- | --- |
-| 使用预装的 `git`、`node`、`npm`、`claude`，以及 Xcode Command Line Tools 带的 `clang`、`make`、`python3`、`pip3` | 都在客户账户能执行的位置 |
+| 使用预装的 `git`、`node`、`npm`、`python3`、`uv`、`claude`，以及 Xcode Command Line Tools 带的 `clang`、`make` | 都在客户账户能执行的位置；除 Claude Code 外都归 root 所有，客户删不掉 |
 | `brew install <软件包>`、`brew upgrade`、`brew uninstall` | `/opt/homebrew` 属于客户账户（只有它能写） |
 | `brew install --cask <应用>`，应用装进 `~/Applications` | `HOMEBREW_CASK_OPTS` 把应用目录设在客户自己的主目录 |
 | `npm install -g <包>`，装进 `~/.npm-global` | 预装的 `node` 在只读的 Nix 目录里，`~/.npmrc` 把全局安装位置改到客户自己的主目录 |
-| `pip3 install <包>`、`python3 -m venv` | Xcode Command Line Tools 的 `python3` 的系统目录不可写，`pip3` 自动改为装进 `~/Library/Python/`；在虚拟环境里装不涉及系统目录。Homebrew 装的 `python3` 不允许直接 `pip install`（PEP 668），要用虚拟环境 |
+| `uv venv`、`uv pip install`、`uv tool install`、`python3 -m venv` | 预装的 `python3` 没有全局 `pip`，软件包装进客户自己目录里的虚拟环境，或交给 `uv`。终端里的 `pip3` 是 Xcode Command Line Tools 带的另一个旧版 Python 的，不要用它 |
 | Claude Code 自己升级 | 装在 `~/.local/bin` |
 
 下面这些需要管理员权限，由平台在平台维护管理员账户里按客户的申请完成：
@@ -106,6 +106,13 @@ Claude Code。客户账户没有管理员权限；需要管理员权限的部分
   去改它，`./verify.sh` 会报告客户不能 `brew install`，要不要交给客户由机主决定
   （docs/ONBOARDING.md 第 15 节的 M5）。
 - 预装的开发工具只有上面表里这些。要别的工具，客户自己 `brew install`。
+- `/opt/homebrew` 交给客户之后，平台维护管理员账户直接 `brew install` 会因为没有写
+  权限而失败，这是有意的。运维替客户装软件包用
+  `sudo -u v2cc -H /opt/homebrew/bin/brew install <包>`（尚未在真机验证）。
+- Docker Desktop 没有写进脚本：下载地址不带版本、没有可以固定的校验值；
+  `--accept-license` 会替人接受 Docker 的订阅协议（较大企业的商业使用要付费）；
+  `--user` 之后只有一个账户能用它。运维按 docs/ONBOARDING.md 6.5 手工用
+  `--user=v2cc` 安装，尚未在真机验证。
 
 ## 升级已经部署过的机器
 
@@ -137,6 +144,10 @@ docs/ONBOARDING.md 第 15 节「迁移」处理。
 - 新版本只增加内容时可以直接升级。新版本改变或去掉了本机已有的内容时，部署会
   在切换前被拦下，系统没有任何改动；是否用 `V2CC_ALLOW_SYSTEM_CHANGES=1` 放行
   由运营方决定（见「多账户共存」）。
+- 预装软件增加了 `python3` 和 `uv` 的这一版，在已经部署过的机器上一定会被拦下：
+  软件包的汇总（`system-path`、`system-applications`）重建了。闭包测试证明拦下的只有
+  这两项、两个账户的 Home Manager 配置不变；放行要用
+  `V2CC_ALLOW_SYSTEM_CHANGES=1 ~/v2cc-mac-setup/bootstrap.sh`。
 - 演练命令已经把 `~/v2cc-mac-setup` 换成了新版本（只换这个目录，不动系统）。此后
   在本机运行 `./bootstrap.sh`，部署的就是新版本。
 - 升级后想回到升级前的系统配置：`./rollback.sh`（见「失败与回退」）。
@@ -237,8 +248,9 @@ UU远程 这类远程桌面软件在用户会话里运行。要让它在重启�
   客户账户的密码。设置完会读回检查，读回不符就自动撤销。
 - 客户自己修改了密码之后，要由平台维护管理员重新运行 `enable`，否则下次重启可能
   停在登录窗口。
-- 平台维护管理员账户的密码不要在客户账户的桌面里输入（包括通过远程会话）：那个
-  会话里的软件由客户控制。
+- 平台维护管理员账户的密码不要输入到客户账户桌面里的「终端」或任何应用里：那个
+  会话里的软件由客户控制。macOS 自己弹出的授权对话框除外（默认做法第 2 项），远程
+  输入过之后在交付前改一次密码。
 - 在已经开启的机器上重新运行 `enable`（例如改了密码之后）而系统工具没有完成时，
   此前的自动登录原样保留；只有确认不了它是否完好时才撤销，并明确说明自动登录
   已经关闭、下次重启会停在登录窗口。
@@ -246,8 +258,9 @@ UU远程 这类远程桌面软件在用户会话里运行。要让它在重启�
   FileVault。
 - UU远程 本身由人设置：用管理员账户安装；在客户账户里登录账号，打开「允许本设备
   被控」「开机自动启动」「防止电脑休眠」，授予「辅助功能」和「录屏与系统录音」
-  （普通账户授予这些权限时，系统可能要求管理员的名字和密码，由平台维护管理员或机主
-  在机器旁输入；是否需要尚未在真机验证）。脚本做不了，也读不到这些。
+  （普通账户授予这些权限时，系统会要求管理员的名字和密码，由运维输入 `v2ccops` 的：
+  在机器旁，或通过远程会话只输入到系统自己的授权对话框里，见 docs/ONBOARDING.md
+  「五个设置问题的默认做法」第 2 项；尚未在真机验证）。脚本做不了，也读不到这些。
 - "登录后立即锁屏"的登录项装在 `/Library/LaunchAgents/com.v2cc.lock-after-login.plist`，
   归 root 所有，只在客户账户的会话里起作用。旧版本把它放在客户的
   `~/Library/LaunchAgents` 里，重新运行 `enable --lock-after-login` 或 `disable` 时
@@ -266,6 +279,8 @@ UU远程 这类远程桌面软件在用户会话里运行。要让它在重启�
 ./bootstrap.sh --customer v2cc --dry-run  # 演练：只报告将要做什么
 ./bootstrap.sh --customer v2cc            # 检查、安装缺失项、部署、验证
 ./bootstrap.sh                            # 重跑：客户账户取系统配置里登记的
+./bootstrap.sh --customer v2cc --ops <账户名>      # 平台维护管理员不叫 v2ccops 时
+./bootstrap.sh --customer v2cc --hand-over-homebrew  # 机主同意后，把机主的 Homebrew 交给客户
 ./rollback.sh              # 回退到上次部署之前的系统配置
 ./rollback.sh --settings   # 只把 7×24 在线设置恢复为启用前的原值
 ./auto-login.sh enable     # 为客户账户开启自动登录（见上）
@@ -292,6 +307,7 @@ UU远程 这类远程桌面软件在用户会话里运行。要让它在重启�
 | --- | --- |
 | `V2CC_DRY_RUN=1` | 同 `--dry-run` |
 | `V2CC_CUSTOMER=<账户>` | 同 `bootstrap.sh --customer`；直接运行 `deploy.sh` 时用 |
+| `V2CC_OPS_ACCOUNT=<账户>` | 同 `bootstrap.sh --ops`，默认 `v2ccops` |
 | `V2CC_ASSUME_YES=1` | 对脚本自己的确认问题回答"是"。不能跳过 macOS 的授权，也不能跳过任何安全拦截 |
 | `V2CC_ALLOW_SYSTEM_CHANGES=1` | 允许改变（但不允许移除）现有账户和系统内容，用于整机有意升级 |
 
@@ -339,7 +355,7 @@ shellcheck -x *.sh lib/*.sh tools/*.sh tests/*.sh modules/*.sh
 桩测试里 `sudo`、`pmset`、`defaults`、`sysadminctl`、`fdesetup`、`chown` 等全部是只碰
 沙盒的替身，不读也不改真实机器；需要管理员权限的替身在没有经过 `sudo` 时会拒绝
 执行，`sudo` 的替身对普通账户拒绝执行。沙盒里有三个账户（机主 `howard`、客户
-`v2cc`、平台维护管理员 `v2ccadmin`），各有自己的主目录。
+`v2cc`、平台维护管理员 `v2ccops`），各有自己的主目录。
 `modules/always-on.sh` 就是进入激活脚本的那一段，桩测试直接运行它，闭包测试确认
 真实构建的激活脚本里逐行包含它。自动登录里必须由人确认的步骤，用系统自带的
 `expect` 在真实的终端里驱动。

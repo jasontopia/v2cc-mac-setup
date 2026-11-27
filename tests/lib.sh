@@ -17,8 +17,8 @@
 #
 # The fake Mac has three accounts, each with its own home under homes/:
 # the machine owner howard (501, administrator), the customer v2cc (502,
-# standard account) and the platform maintenance administrator v2ccadmin
-# (503). Scripts run as v2ccadmin unless a test says otherwise (become).
+# standard account) and the platform maintenance administrator v2ccops
+# (503). Scripts run as v2ccops unless a test says otherwise (become).
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP_ROOT="$(mktemp -d)"
@@ -90,7 +90,7 @@ write_stub() {
 
 new_sandbox() {
   SB="$TMP_ROOT/sb$tests_run"
-  AH="$SB/homes/v2ccadmin"
+  AH="$SB/homes/v2ccops"
   CH="$SB/homes/v2cc"
   mkdir -p "$SB/root/tmp" "$SB/root/run" "$SB/root/nix/var/nix/profiles" \
     "$SB/homes/howard" "$AH" "$CH" "$SB/state" "$SB/store" "$SB/bin" "$SB/late" "$SB/repo"
@@ -100,9 +100,9 @@ new_sandbox() {
 
   # A blank Apple Silicon Mac: the owner's account, the customer's standard
   # account, and the platform maintenance administrator running the setup.
-  printf '%s\n' 'howard 501 staff admin' 'v2cc 502 staff' 'v2ccadmin 503 staff admin' \
+  printf '%s\n' 'howard 501 staff admin' 'v2cc 502 staff' 'v2ccops 503 staff admin' \
     >"$SB/state/accounts"
-  echo v2ccadmin >"$SB/state/user"
+  echo v2ccops >"$SB/state/user"
   echo arm64 >"$SB/state/arch"
   echo 27.2 >"$SB/state/macos"
   echo 200 >"$SB/state/free_gb"
@@ -411,8 +411,8 @@ chmod +x "$HOME/.local/bin/claude"
 EOF
 
   # By default the configuration built for this machine manages v2cc only,
-  # deployed from v2ccadmin, which became the primary user.
-  make_system fresh v2ccadmin "v2cc=gen-v2cc"
+  # deployed from v2ccops, which became the primary user.
+  make_system fresh v2ccops "v2cc=gen-v2cc"
   add_always_on fresh
   system_path fresh >"$SB/state/new_system"
 }
@@ -438,7 +438,7 @@ make_system() {
     "$dir/Library/LaunchDaemons" "$dir/user/Library/LaunchAgents"
   : >"$dir/Library/LaunchDaemons/org.nixos.activate-system.plist"
   printf '{"darwinLabel":"stub-%s"}\n' "$name" >"$dir/darwin-version.json"
-  for tool in git node darwin-rebuild; do
+  for tool in git node python3 uv darwin-rebuild; do
     printf '#!/bin/bash\necho "%s 1.0"\n' "$tool" >"$dir/sw/bin/$tool"
     chmod +x "$dir/sw/bin/$tool"
   done

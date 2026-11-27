@@ -13,6 +13,12 @@
 #   ./bootstrap.sh --customer <account> --dry-run  only report what would be done
 #   ./bootstrap.sh                                 rerun for the customer already recorded
 #
+#   --ops <account>        the platform maintenance administrator account
+#                          this must run in (default v2ccops, or V2CC_OPS_ACCOUNT)
+#   --hand-over-homebrew   also hand over a Homebrew that belongs to another
+#                          account, such as the machine owner's; only with the
+#                          owner's consent
+#
 # The customer's own part (Claude Code and the shell setup for brew, npm
 # and casks) is customer-setup.sh, run afterwards in the customer account.
 #
@@ -26,8 +32,12 @@ cd "$(dirname "$0")"
 # shellcheck source=lib/system-guard.sh
 . ./lib/system-guard.sh
 
-usage="用法：./bootstrap.sh --customer <客户账户名> [--dry-run]"
+usage="用法：./bootstrap.sh --customer <客户账户名> [--ops <运维管理员账户名>] [--hand-over-homebrew] [--dry-run]"
 customer="${V2CC_CUSTOMER:-}"
+# The default name is awaiting the owner's confirmation (docs/ONBOARDING.md,
+# 「五个设置问题的默认做法」).
+ops="${V2CC_OPS_ACCOUNT:-v2ccops}"
+hand_over_foreign_brew=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) V2CC_DRY_RUN=1 ;;
@@ -36,6 +46,12 @@ while [ $# -gt 0 ]; do
       customer="$2"
       shift
       ;;
+    --ops)
+      [ $# -ge 2 ] || die "--ops 需要运维管理员账户名。$usage"
+      ops="$2"
+      shift
+      ;;
+    --hand-over-homebrew) hand_over_foreign_brew=1 ;;
     *) die "未知参数：${1}。$usage" ;;
   esac
   shift
@@ -65,6 +81,11 @@ step_preflight() {
     die "请用平台维护管理员账户直接运行，不要使用 sudo 或 root。"
   is_admin "$(id -un)" ||
     die "当前账户 $(id -un) 不是管理员。本脚本要在平台维护管理员账户里运行；客户账户是普通账户，它自己的部分用 ./customer-setup.sh。"
+  # The primary user of a new system is the account deploying it, and it
+  # can never change afterwards: deploy only from the ops account, not from
+  # the owner's.
+  [ "$(id -un)" = "$ops" ] ||
+    die "当前账户 $(id -un) 不是平台维护管理员账户 ${ops}。请在 ${ops} 里运行；这台机器的平台维护管理员用别的名字时，加 --ops <账户名>。"
 
   # On a rerun the running system remembers the customer.
   [ -n "$customer" ] || customer="$(sys_customer_user "$(resolve_link "$CURRENT_SYSTEM_LINK")")"
@@ -81,7 +102,7 @@ step_preflight() {
     die "磁盘可用空间不足：需要至少 15 GB，当前 ${free_gb:-未知} GB。"
 
   ok "Apple Silicon，macOS $(sw_vers -productVersion)，可用空间 ${free_gb} GB"
-  ok "运行部署的管理员账户：$(id -un)；客户账户（普通账户）：$customer"
+  ok "运行部署的平台维护管理员账户：$(id -un)；客户账户（普通账户）：$customer"
 }
 
 step_clt() {
@@ -191,9 +212,14 @@ hand_over_brew() {
     ok "Homebrew 属于客户账户 ${customer}。"
     return 0
   fi
-  if [ "$owner" != "$(id -un)" ]; then
-    warn "Homebrew（${BREW_PREFIX}）属于账户 ${owner}，不属于客户账户 ${customer}。本脚本不改动别的账户的 Homebrew，所以在这台机器上客户不能自己 brew install。是否交给客户由机主决定，见 docs/ONBOARDING.md 第 15 节「迁移」的 M5。"
+  if [ "$owner" != "$(id -un)" ] && [ "$hand_over_foreign_brew" != "1" ]; then
+    warn "Homebrew（${BREW_PREFIX}）属于账户 ${owner}，不属于客户账户 ${customer}。本脚本默认不改动别的账户的 Homebrew，所以在这台机器上客户不能自己 brew install。是否交给客户由机主决定；机主同意后加 --hand-over-homebrew 重新运行，见 docs/ONBOARDING.md 第 15 节「迁移」的 M5。"
     return 0
+  fi
+  if [ "$owner" != "$(id -un)" ]; then
+    warn "将把属于账户 ${owner} 的 Homebrew 交给客户账户 ${customer}：此后 ${owner} 不能再用它安装软件。"
+    is_dry_run || confirm "机主已经同意把账户 ${owner} 的 Homebrew 交给客户账户 ${customer}？" ||
+      die "已取消，Homebrew 没有改动。"
   fi
   if is_dry_run; then
     printf '  [演练] 将执行：sudo chown -R %s:staff %s，然后 sudo chmod -R go-w %s\n' \

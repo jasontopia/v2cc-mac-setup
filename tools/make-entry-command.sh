@@ -8,6 +8,8 @@
 #       bootstrap.sh for that customer account (system part)
 #   tools/make-entry-command.sh [--dry-run] [git-ref]
 #       the same, for a machine whose system already records its customer
+#   tools/make-entry-command.sh [--dry-run] --customer <account> --ops <account> [git-ref]
+#       the same, when the platform maintenance administrator is not v2ccops
 #   tools/make-entry-command.sh [--dry-run] --customer-setup [git-ref]
 #       for the customer's standard account: runs customer-setup.sh
 #
@@ -34,6 +36,7 @@ set -euo pipefail
 repo="${V2CC_REPO:-jasontopia/v2cc-mac-setup}"
 prefix=""
 customer=""
+ops=""
 customer_setup=0
 ref=""
 
@@ -50,6 +53,11 @@ while [ $# -gt 0 ]; do
       customer="$2"
       shift
       ;;
+    --ops)
+      [ $# -ge 2 ] || die "--ops 需要运维管理员账户名。"
+      ops="$2"
+      shift
+      ;;
     --customer-setup) customer_setup=1 ;;
     -*) die "未知参数：$1" ;;
     *)
@@ -62,7 +70,7 @@ done
 ref="${ref:-main}"
 
 if [ "$customer_setup" = "1" ]; then
-  [ -z "$customer" ] || die "--customer-setup 不能和 --customer 一起使用。"
+  [ -z "$customer" ] && [ -z "$ops" ] || die "--customer-setup 不能和 --customer、--ops 一起使用。"
   script="customer-setup.sh"
   run_args=""
   account_text="客户的普通账户（例如 v2cc）"
@@ -77,7 +85,13 @@ else
     esac
     run_args=" --customer $customer"
   fi
-  account_text="平台维护管理员账户"
+  if [ -n "$ops" ]; then
+    case "$ops" in
+      '' | *[!a-z0-9_.-]* | -* | .*) die "运维管理员账户名「${ops}」含有不支持的字符。" ;;
+    esac
+    run_args="$run_args --ops $ops"
+  fi
+  account_text="平台维护管理员账户（${ops:-v2ccops}）"
 fi
 
 command -v gh >/dev/null 2>&1 || die "需要已登录的 GitHub CLI（gh）。"

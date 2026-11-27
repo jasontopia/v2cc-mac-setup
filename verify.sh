@@ -1,10 +1,16 @@
 #!/bin/bash
 #
 # Post-deploy verification. Read-only: it changes nothing and can be rerun
-# at any time. Exits non-zero if any check fails.
+# at any time, from any account. Exits non-zero if any check fails.
 #
 #   ./verify.sh                 run every check
 #   ./verify.sh --credentials   only scan for leftover GitHub credentials
+#
+# The machine-wide checks are the same from every account. What lives in
+# the customer's own account (Claude Code, brew and npm in a new Terminal
+# window) can only be seen from there, so those checks run when the
+# customer account runs this, and are only named otherwise. The credential
+# scan covers the account running it.
 set -uo pipefail
 
 cd "$(dirname "$0")" || exit 1
@@ -14,6 +20,8 @@ cd "$(dirname "$0")" || exit 1
 . ./lib/system-guard.sh
 # shellcheck source=lib/always-on.sh
 . ./lib/always-on.sh
+# shellcheck source=lib/monitor.sh
+. ./lib/monitor.sh
 
 use_nix_and_brew_path
 
@@ -184,9 +192,10 @@ report_restart_state() {
     lock_agent="$(auto_login_marker lock_agent)"
     if [ -z "$lock_agent" ]; then
       note "登录后不会自动锁屏：重启后桌面处于已解锁状态。"
-    elif [ "$marker_user" != "$me" ]; then
-      # Another account's ~/Library cannot be looked into from here.
-      note "登录后立即锁屏的登录项在账户 ${marker_user} 的目录里，从当前账户无法检查。"
+    elif [ "$lock_agent" != "$LOCK_AGENT" ] && [ "$marker_user" != "$me" ]; then
+      # An earlier version put it in the customer's ~/Library, which
+      # another account cannot look into.
+      note "登录后立即锁屏的登录项在账户 ${marker_user} 的目录里（旧版本的位置），从当前账户无法检查。"
     elif [ -e "$lock_agent" ]; then
       note "登录后立即关闭显示器并锁屏的登录项已安装（是否生效、锁屏后 UU远程 能否连接，尚未在真机验证）。"
     else
@@ -215,6 +224,155 @@ report_restart_state() {
   note "上次开机：$(sysctl -n kern.boottime 2>/dev/null | sed 's/^.*} //')"
 }
 
+# The customer account as the system records it: managed, a standard
+# account, and the owner of Homebrew. Readable from every account.
+check_customer() {
+  local owner
+  info "检查客户账户..."
+  if [ -z "$customer" ]; then
+    flunk "当前系统配置没有登记客户账户（部署的是更早的版本）。请按 docs/ONBOARDING.md 第 15 节「迁移」部署新版本。"
+    return 0
+  fi
+  if sys_hm_users "$current_system" | grep -Fxq -- "$customer"; then
+    pass "客户账户 $customer 由系统配置管理"
+  else
+    flunk "客户账户 $customer 不在系统配置管理的账户中"
+  fi
+  if ! id -u -- "$customer" >/dev/null 2>&1; then
+    flunk "客户账户 $customer 在本机不存在"
+  elif is_admin "$customer"; then
+    flunk "客户账户 $customer 是管理员，应为普通账户（标准用户）"
+  else
+    pass "客户账户 $customer 是普通账户（标准用户），没有管理员权限"
+  fi
+  owner="$(stat -f '%Su' "$BREW_PREFIX" 2>/dev/null || true)"
+  if [ "$owner" = "$customer" ]; then
+    pass "Homebrew（${BREW_PREFIX}）属于客户账户 ${customer}：客户 brew install 不需要管理员密码"
+  else
+    flunk "Homebrew（${BREW_PREFIX}）属于账户「${owner:-不存在}」，不属于客户账户 ${customer}：客户不能自己 brew install"
+  fi
+}
+
+# What lives in the customer's own account, seen from that account.
+check_customer_home() {
+  local expected_home active_home resolved
+  if [ -z "$customer" ] || [ "$me" != "$customer" ]; then
+    info "客户账户里的检查（Home Manager、Claude Code、brew、npm）..."
+    note "这些只能在客户账户${customer:+ ${customer} }里检查：在那里运行 ~/v2cc-mac-setup/verify.sh。"
+    return 0
+  fi
+
+  info "检查客户账户 ${me} 的使用环境..."
+  expected_home="$(resolve_link "$(sys_hm_generation "$current_system" "$me")")"
+  active_home="$(resolve_link "$HOME/.local/state/home-manager/gcroots/current-home")"
+  if [ -n "$expected_home" ] && [ "$active_home" = "$expected_home" ]; then
+    pass "当前账户的 Home Manager 配置已生效"
+  else
+    flunk "当前账户的 Home Manager 配置未生效（期望 ${expected_home:-未知}，实际 ${active_home:-无}）"
+  fi
+
+  check "Claude Code 已安装" "$HOME/.local/bin/claude" --version
+  # Being installed is not the same as being found: test what a newly
+  # opened terminal window resolves, not an absolute path.
+  resolved="$(fresh_zsh_claude)"
+  if [ "${resolved#/}" != "$resolved" ] && [ -x "$resolved" ]; then
+    pass "新开的终端窗口能找到 claude 命令（${resolved}）"
+  else
+    flunk "新开的终端窗口找不到 claude 命令。请确认 ~/.zprofile 里有这一行：export PATH=\"\$HOME/.local/bin:\$PATH\"，并且 ~/.zshrc 没有重设 PATH。"
+  fi
+
+  resolved="$(fresh_zsh_print 'command -v brew')"
+  if [ "$resolved" = "$BREW_PREFIX/bin/brew" ]; then
+    pass "新开的终端窗口能找到 brew 命令（${resolved}）"
+  else
+    flunk "新开的终端窗口找不到 ${BREW_PREFIX}/bin/brew（找到的是「${resolved:-无}」）。请运行 ./customer-setup.sh。"
+  fi
+  # shellcheck disable=SC2016
+  resolved="$(fresh_zsh_print 'print -r -- $HOMEBREW_CASK_OPTS')"
+  if [ "$resolved" = "--appdir=$HOME/Applications" ]; then
+    pass "brew install --cask 把应用装进 ~/Applications（/Applications 只有管理员能写）"
+  else
+    flunk "新开的终端窗口里 HOMEBREW_CASK_OPTS 不是 --appdir=$HOME/Applications（当前「${resolved}」）：装应用会需要管理员密码。请运行 ./customer-setup.sh。"
+  fi
+  resolved="$(sed -n 's/^prefix[[:space:]]*=[[:space:]]*//p' "$HOME/.npmrc" 2>/dev/null | head -n 1)"
+  case "$resolved" in
+    "$HOME"/*) pass "npm install -g 装进本账户（${resolved}）" ;;
+    *) flunk "$HOME/.npmrc 没有把 npm 的安装位置设在本账户里（当前「${resolved:-未设定}」）：npm install -g 会写只读的 Nix 目录而失败。请运行 ./customer-setup.sh。" ;;
+  esac
+}
+
+# The machine monitor: installed, running, writing fresh records, the hash
+# chain intact, and uploading when an upload target is configured.
+check_monitor() {
+  local last age today yesterday files upload ok_at err options
+  info "检查监测程序..."
+  if ! mon_installed; then
+    flunk "监测程序没有安装（${MON_PLIST}）。运行 ./monitor.sh install，或重新运行 ./bootstrap.sh。"
+    return 0
+  fi
+  pass "监测程序已安装（${MON_PROG}）"
+  if mon_loaded; then
+    pass "监测程序在运行（launchd 服务 $MON_LABEL 已加载）"
+  else
+    flunk "监测程序没有在运行：launchd 服务 $MON_LABEL 没有加载。在平台维护管理员账户里运行 ./monitor.sh install。"
+  fi
+  last="$(mon_status last_run_epoch)"
+  if [ -z "$last" ]; then
+    flunk "监测程序还没有写出任何记录（${MON_STATUS} 不存在）"
+  else
+    age=$(($(date -u +%s) - last))
+    if [ "$age" -le "$MON_STALE_SECONDS" ]; then
+      pass "最近一次记录在 $((age / 60)) 分钟前（序号 $(mon_status last_seq)，机器编号 $(mon_status machine)）"
+    else
+      flunk "最近一次记录在 $((age / 60)) 分钟前，超过 15 分钟：监测程序可能停了"
+    fi
+  fi
+  [ "$(mon_status rejected)" = 0 ] || [ -z "$(mon_status rejected)" ] ||
+    flunk "上一轮有 $(mon_status rejected) 条记录因为含有字段清单以外的内容没有写入"
+
+  today="$MON_RECORDS/$(date -u '+%Y-%m-%d').jsonl"
+  yesterday="$MON_RECORDS/$(date -u -r $(($(date -u +%s) - 86400)) '+%Y-%m-%d').jsonl"
+  if [ ! -r "$MON_RECORDS" ] || ! ls "$MON_RECORDS" >/dev/null 2>&1; then
+    note "记录只有管理员能读：在平台维护管理员账户里运行 ./verify.sh 才会检查哈希链。"
+  else
+    files=""
+    [ ! -r "$yesterday" ] || files="$yesterday"
+    [ ! -r "$today" ] || files="$files${files:+
+}$today"
+    options="$(mon_config DETAIL_ADDRESSES | sed 's/^1$/DETAIL_ADDRESSES/;/^0$/d'),$(mon_config DETAIL_FINGERPRINT | sed 's/^1$/DETAIL_FINGERPRINT/;/^0$/d')"
+    if [ -z "$files" ]; then
+      flunk "今天还没有记录文件（${today}）"
+    elif printf '%s\n' "$files" | tr '\n' '\0' | xargs -0 /bin/bash "$MON_PROG" check --quiet --options "$options" >/dev/null 2>&1; then
+      pass "哈希链完整，每条记录都只含字段清单里的字段（$(printf '%s\n' "$files" | wc -l | tr -d ' ') 个记录文件）"
+    else
+      flunk "记录的哈希链或字段检查没有通过。查看详情：/bin/bash \"$MON_PROG\" check $(printf '%s\n' "$files" | sed 's/.*/"&"/' | tr '\n' ' ')"
+    fi
+  fi
+
+  upload="$(mon_status upload)"
+  ok_at="$(mon_status last_upload_ok_epoch)"
+  err="$(mon_status last_upload_error)"
+  case "$upload" in
+    configured)
+      if [ -n "$ok_at" ] && [ $(($(date -u +%s) - ok_at)) -le 7200 ]; then
+        pass "记录已上传到机器外（最近一次成功：$(date -u -r "$ok_at" '+%Y-%m-%d %H:%M UTC')）"
+      else
+        flunk "记录最近 2 小时没有上传成功${err:+（最近一次失败：${err}）}"
+      fi
+      ;;
+    credential-missing)
+      flunk "已配置上传目标，但上传凭证不存在，或不是只有 root 能读：./monitor.sh configure --upload-credential"
+      ;;
+    *)
+      warn "上传目标没有配置：监测记录只保存在本机，没有传到机器外。要机主提供的东西见 docs/monitoring.md「要机主提供或决定的事」。"
+      ;;
+  esac
+  [ "$(mon_status timestamps)" = configured ] ||
+    warn "每日时间戳没有配置：记录文件的指纹没有交给时间戳服务。"
+  [ -z "$(mon_status detail_options)" ] ||
+    warn "已开启超出网站那句话的加记：$(mon_status detail_options)。只有机主决定开启时才应如此。"
+}
+
 finish() {
   if [ "$failures" -eq 0 ]; then
     info "验证通过。"
@@ -231,6 +389,7 @@ fi
 
 me="$(id -un)"
 current_system="$(resolve_link "$CURRENT_SYSTEM_LINK")"
+customer="$(sys_customer_user "$current_system")"
 
 info "检查基础依赖..."
 check "Xcode Command Line Tools" xcode-select -p
@@ -268,40 +427,21 @@ else
     fi
   fi
 
-  if sys_hm_users "$current_system" | grep -Fxq -- "$me"; then
-    pass "当前账户 $me 由系统配置管理"
-  else
-    flunk "当前账户 $me 不在系统配置管理的账户中"
-  fi
   pass "系统配置管理的账户：$(sys_hm_users "$current_system" | tr '\n' ' ')"
-
-  expected_home="$(resolve_link "$(sys_hm_generation "$current_system" "$me")")"
-  active_home="$(resolve_link "$HOME/.local/state/home-manager/gcroots/current-home")"
-  if [ -n "$expected_home" ] && [ "$active_home" = "$expected_home" ]; then
-    pass "当前账户的 Home Manager 配置已生效"
-  else
-    flunk "当前账户的 Home Manager 配置未生效（期望 ${expected_home:-未知}，实际 ${active_home:-无}）"
-  fi
+  check_customer
 
   check "系统命令 git" "$current_system/sw/bin/git" --version
   check "系统命令 node" "$current_system/sw/bin/node" --version
+  check "系统命令 python3" "$current_system/sw/bin/python3" --version
+  check "系统命令 uv" "$current_system/sw/bin/uv" --version
   check "开机自动激活服务 org.nixos.activate-system" \
     launchctl print system/org.nixos.activate-system
 
   check_always_on
 fi
 report_restart_state
-
-info "检查 Claude Code..."
-check "Claude Code 已安装" "$HOME/.local/bin/claude" --version
-# Being installed is not the same as being found: test what a newly opened
-# terminal window resolves, not an absolute path.
-resolved="$(fresh_zsh_claude)"
-if [ "${resolved#/}" != "$resolved" ] && [ -x "$resolved" ]; then
-  pass "新开的终端窗口能找到 claude 命令（${resolved}）"
-else
-  flunk "新开的终端窗口找不到 claude 命令。请确认 ~/.zprofile 里有这一行：export PATH=\"\$HOME/.local/bin:\$PATH\"，并且 ~/.zshrc 没有重设 PATH。"
-fi
+check_monitor
+check_customer_home
 
 check_credentials
 finish

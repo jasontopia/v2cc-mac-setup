@@ -9,7 +9,9 @@
 #   ./rollback.sh --settings         only put the always-on settings back
 #
 # This re-activates the previous configuration; it does not delete files in
-# any home directory.
+# any home directory. Run it in the account that deployed, the platform
+# maintenance administrator account: the record of the last deploy is kept
+# there, and everything but --list needs administrator rights.
 #
 # The always-on settings (power, auto-logout, macOS update installation)
 # live in macOS, not in the Nix store, so re-activating an older
@@ -137,6 +139,8 @@ while [ $# -gt 0 ]; do
   shift
 done
 
+require_admin "回退系统配置或恢复系统设置"
+
 if [ "$settings_only" = "1" ]; then
   [ -z "$target" ] || die "--settings 不能和 --to 一起使用。"
   if is_dry_run; then
@@ -159,7 +163,7 @@ fi
 if [ -z "$target" ]; then
   state_file="$V2CC_STATE_DIR/last-deploy"
   [ -r "$state_file" ] ||
-    die "没有找到上次部署的记录（${state_file}）。可用 ./rollback.sh --list 查看历史版本，再用 --to 指定。"
+    die "没有找到上次部署的记录（${state_file}）。记录在运行部署的账户里：请在那个账户里运行；或者用 ./rollback.sh --list 查看历史版本，再用 --to 指定。"
   target="$(sed -n 's/^previous=//p' "$state_file" | head -n 1)"
   [ -n "$target" ] ||
     die "上次部署是本机的首次部署，没有可回退的系统配置。只恢复 7×24 在线设置启用前的原值，可以运行 ./rollback.sh --settings。"

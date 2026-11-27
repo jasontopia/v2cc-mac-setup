@@ -1,15 +1,28 @@
 #!/bin/bash
 #
-# V2CC Mac mini setup: the single entry point.
+# V2CC Mac mini setup: the system part, the single entry point for it.
 #
-# Run it in the account that will use Claude Code (a separate administrator
-# account such as `v2cc`). It checks the machine, installs whatever is
-# missing, deploys the system configuration, installs Claude Code and
-# verifies the result. Everything already in place is skipped, so it is
-# safe to rerun after a failure.
+# Run it in the platform maintenance administrator account, never in the
+# customer's account: the customer account is a standard account without
+# administrator rights. It checks the machine, installs whatever is
+# missing, hands Homebrew to the customer account, deploys the system
+# configuration, installs the machine monitor and verifies the result. Everything already in place is
+# skipped, so it is safe to rerun after a failure.
 #
-#   ./bootstrap.sh              do it
-#   ./bootstrap.sh --dry-run    only report what would be done
+#   ./bootstrap.sh --customer <account>            do it
+#   ./bootstrap.sh --customer <account> --dry-run  only report what would be done
+#   ./bootstrap.sh                                 rerun for the customer already recorded
+#
+#   --ops <account>        the platform maintenance administrator account
+#                          this must run in (default v2ccops, or V2CC_OPS_ACCOUNT)
+#   --machine-id <id>      the internal name the monitor records for this machine
+#                          (default: the one already configured, or a new random one)
+#   --hand-over-homebrew   also hand over a Homebrew that belongs to another
+#                          account, such as the machine owner's; only with the
+#                          owner's consent
+#
+# The customer's own part (Claude Code and the shell setup for brew, npm
+# and casks) is customer-setup.sh, run afterwards in the customer account.
 #
 # macOS asks for the account password (administrator authorization) and may
 # show its own install dialogs; those cannot be automated away.
@@ -18,12 +31,38 @@ set -euo pipefail
 cd "$(dirname "$0")"
 # shellcheck source=lib/common.sh
 . ./lib/common.sh
+# shellcheck source=lib/system-guard.sh
+. ./lib/system-guard.sh
 
-for arg in "$@"; do
-  case "$arg" in
+usage="用法：./bootstrap.sh --customer <客户账户名> [--ops <运维管理员账户名>] [--machine-id <机器编号>] [--hand-over-homebrew] [--dry-run]"
+customer="${V2CC_CUSTOMER:-}"
+# The default name is awaiting the owner's confirmation (docs/ONBOARDING.md,
+# 「五个设置问题的默认做法」).
+ops="${V2CC_OPS_ACCOUNT:-v2ccops}"
+hand_over_foreign_brew=0
+machine_id=""
+while [ $# -gt 0 ]; do
+  case "$1" in
     --dry-run) V2CC_DRY_RUN=1 ;;
-    *) die "未知参数：${arg}（可用：--dry-run）" ;;
+    --customer)
+      [ $# -ge 2 ] || die "--customer 需要客户账户名。$usage"
+      customer="$2"
+      shift
+      ;;
+    --ops)
+      [ $# -ge 2 ] || die "--ops 需要运维管理员账户名。$usage"
+      ops="$2"
+      shift
+      ;;
+    --hand-over-homebrew) hand_over_foreign_brew=1 ;;
+    --machine-id)
+      [ $# -ge 2 ] || die "--machine-id 需要机器编号。$usage"
+      machine_id="$2"
+      shift
+      ;;
+    *) die "未知参数：${1}。$usage" ;;
   esac
+  shift
 done
 export V2CC_DRY_RUN
 
@@ -47,9 +86,20 @@ step_preflight() {
   [ "$(uname -s)" = "Darwin" ] && [ "$(uname -m)" = "arm64" ] ||
     die "仅支持 Apple Silicon Mac。"
   [ "$(id -u)" -ne 0 ] ||
-    die "请用要使用 Claude Code 的账户直接运行，不要使用 sudo 或 root。"
-  id -Gn | tr ' ' '\n' | grep -Fxq admin ||
-    die "当前账户 $(id -un) 不是管理员。请机主在「系统设置 > 用户与群组」中把它设为管理员后重试。"
+    die "请用平台维护管理员账户直接运行，不要使用 sudo 或 root。"
+  is_admin "$(id -un)" ||
+    die "当前账户 $(id -un) 不是管理员。本脚本要在平台维护管理员账户里运行；客户账户是普通账户，它自己的部分用 ./customer-setup.sh。"
+  # The primary user of a new system is the account deploying it, and it
+  # can never change afterwards: deploy only from the ops account, not from
+  # the owner's.
+  [ "$(id -un)" = "$ops" ] ||
+    die "当前账户 $(id -un) 不是平台维护管理员账户 ${ops}。请在 ${ops} 里运行；这台机器的平台维护管理员用别的名字时，加 --ops <账户名>。"
+
+  # On a rerun the running system remembers the customer.
+  [ -n "$customer" ] || customer="$(sys_customer_user "$(resolve_link "$CURRENT_SYSTEM_LINK")")"
+  [ -n "$customer" ] || die "请指定客户账户。$usage"
+  check_customer_account "$customer"
+  export V2CC_CUSTOMER="$customer"
 
   os_major="$(sw_vers -productVersion | cut -d. -f1)"
   [ "$os_major" -ge 14 ] 2>/dev/null ||
@@ -59,7 +109,8 @@ step_preflight() {
   [ "${free_gb:-0}" -ge 15 ] 2>/dev/null ||
     die "磁盘可用空间不足：需要至少 15 GB，当前 ${free_gb:-未知} GB。"
 
-  ok "Apple Silicon，macOS $(sw_vers -productVersion)，管理员账户 $(id -un)，可用空间 ${free_gb} GB"
+  ok "Apple Silicon，macOS $(sw_vers -productVersion)，可用空间 ${free_gb} GB"
+  ok "运行部署的平台维护管理员账户：$(id -un)；客户账户（普通账户）：$customer"
 }
 
 step_clt() {
@@ -135,24 +186,61 @@ step_brew() {
   local work_dir
   info "[4/7] Homebrew..."
   if brew_installed; then
-    ok "已安装，跳过。"
-    return 0
-  fi
-  if is_dry_run; then
+    ok "已安装。"
+  elif is_dry_run; then
     printf '  [演练] 将执行：下载并校验 Homebrew 官方安装脚本（%s），然后安装\n' "$HOMEBREW_INSTALL_COMMIT"
+    printf '  [演练] 安装后将把 %s 交给客户账户 %s\n' "$BREW_PREFIX" "$customer"
     pending="$pending brew"
     return 0
+  else
+    work_dir="$(mktemp -d)"
+    info "下载并校验 Homebrew 官方安装脚本..."
+    fetch_verified "$HOMEBREW_INSTALL_URL" "$HOMEBREW_INSTALL_SHA256" "$work_dir/install.sh"
+    ensure_sudo "安装 Homebrew"
+    NONINTERACTIVE=1 /bin/bash "$work_dir/install.sh" ||
+      die "Homebrew 安装失败。按上面的提示处理后重新运行本命令即可。"
+    rm -rf "$work_dir"
+    brew_installed || die "Homebrew 安装后仍找不到 brew 命令。"
+    ok "安装完成。"
   fi
+  hand_over_brew
+}
 
-  work_dir="$(mktemp -d)"
-  info "下载并校验 Homebrew 官方安装脚本..."
-  fetch_verified "$HOMEBREW_INSTALL_URL" "$HOMEBREW_INSTALL_SHA256" "$work_dir/install.sh"
-  ensure_sudo "安装 Homebrew"
-  NONINTERACTIVE=1 /bin/bash "$work_dir/install.sh" ||
-    die "Homebrew 安装失败。按上面的提示处理后重新运行本命令即可。"
-  rm -rf "$work_dir"
-  brew_installed || die "Homebrew 安装后仍找不到 brew 命令。"
-  ok "安装完成。"
+# Homebrew has exactly one owner, and only that account can install with
+# it. Give the copy this account just installed to the customer, with the
+# ownership and permissions Homebrew's own installer gives a standard
+# account (owner, its group staff, not writable by anyone else), so that
+# `brew install` in the customer account needs no password. A Homebrew that
+# belongs to another account, such as the machine owner's, is not ours to
+# hand over and is only reported.
+hand_over_brew() {
+  local owner
+  owner="$(stat -f '%Su' "$BREW_PREFIX")"
+  if [ "$owner" = "$customer" ]; then
+    ok "Homebrew 属于客户账户 ${customer}。"
+    return 0
+  fi
+  if [ "$owner" != "$(id -un)" ] && [ "$hand_over_foreign_brew" != "1" ]; then
+    warn "Homebrew（${BREW_PREFIX}）属于账户 ${owner}，不属于客户账户 ${customer}。本脚本默认不改动别的账户的 Homebrew，所以在这台机器上客户不能自己 brew install。是否交给客户由机主决定；机主同意后加 --hand-over-homebrew 重新运行，见 docs/ONBOARDING.md 第 15 节「迁移」的 M5。"
+    return 0
+  fi
+  if [ "$owner" != "$(id -un)" ]; then
+    warn "将把属于账户 ${owner} 的 Homebrew 交给客户账户 ${customer}：此后 ${owner} 不能再用它安装软件。"
+    is_dry_run || confirm "机主已经同意把账户 ${owner} 的 Homebrew 交给客户账户 ${customer}？" ||
+      die "已取消，Homebrew 没有改动。"
+  fi
+  if is_dry_run; then
+    printf '  [演练] 将执行：sudo chown -R %s:staff %s，然后 sudo chmod -R go-w %s\n' \
+      "$customer" "$BREW_PREFIX" "$BREW_PREFIX"
+    return 0
+  fi
+  ensure_sudo "把 Homebrew 交给客户账户"
+  if ! { sudo chown -R "$customer:staff" "$BREW_PREFIX" && sudo chmod -R go-w "$BREW_PREFIX"; }; then
+    die "未能把 ${BREW_PREFIX} 交给客户账户 ${customer}。修复上面的错误后重新运行本命令即可。"
+  fi
+  [ "$(stat -f '%Su' "$BREW_PREFIX")" = "$customer" ] ||
+    die "${BREW_PREFIX} 的所属账户仍然不是 ${customer}。"
+  ok "Homebrew 已交给客户账户 ${customer}：只有这个账户能用它安装和卸载，不需要管理员密码。"
 }
 
 step_deploy() {
@@ -164,9 +252,15 @@ step_deploy() {
   ./deploy.sh
 }
 
-step_claude() {
-  info "[6/7] Claude Code..."
-  ./install-claude.sh
+# The machine monitor (monitor.sh, docs/monitoring.md): part of every setup,
+# so a new machine is fully ready after this one run.
+step_monitor() {
+  info "[6/7] 监测程序..."
+  if [ -n "$pending" ] || { is_dry_run && [ -z "$(resolve_link "$CURRENT_SYSTEM_LINK")" ]; }; then
+    printf '  [演练] 将安装并启动监测程序（launchd 服务 com.v2cc.monitor，每 5 分钟记录一次）\n'
+    return 0
+  fi
+  ./monitor.sh install ${machine_id:+--machine-id "$machine_id"}
 }
 
 step_verify() {
@@ -178,23 +272,19 @@ step_verify() {
   ./verify.sh
 }
 
-info "V2CC Mac mini 部署$(is_dry_run && printf '（演练模式，不改动系统）' || true)"
+info "V2CC Mac mini 部署：系统部分$(is_dry_run && printf '（演练模式，不改动系统）' || true)"
 step_preflight
 step_clt
 step_nix
 use_nix_and_brew_path
 step_brew
 step_deploy
-step_claude
+step_monitor
 step_verify
 
 if is_dry_run; then
   info "演练结束，系统没有任何改动。"
-elif window_sees_claude; then
-  info "V2CC 部署完成。现在可以运行 claude 开始使用。"
 else
-  info "V2CC 部署完成。"
-  info "注意：这个终端窗口是在部署之前打开的，在它里面还找不到 claude 命令。"
-  info "请新开一个终端窗口（⌘N），或者在本窗口运行：exec zsh -l"
-  info "然后运行 claude 开始使用。"
+  info "V2CC 系统部分部署完成。"
+  info "接下来在客户账户 ${customer} 里运行客户入口命令（tools/make-entry-command.sh --customer-setup 生成），装好 Claude Code 和 brew、npm 的使用环境。"
 fi

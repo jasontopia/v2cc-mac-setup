@@ -1,0 +1,132 @@
+# Every field a monitor record may contain. v2cc-monitor refuses to write a
+# record with any other field, and tests/run.sh checks the same thing with
+# its own parser. What each field means: docs/monitoring.md.
+#
+#   <kind> <path> <type> [<option>,...]
+#
+# kind "*" is the envelope every record has. A path names a value inside
+# the record; "[]" is any element of an array. Types: string, number, bool.
+# A line with options is allowed only while one of those options is on in
+# the configuration. They are off by default.
+
+*        v                              number
+*        seq                            number
+*        machine                        string
+*        ts                             string
+*        prev                           string
+*        kind                           string
+
+# Once, when the monitor first runs on a machine; and when a record could
+# not be written because it did not match this list.
+notice   data.event                     string
+notice   data.version                   number
+notice   data.about                     string
+
+# Every 5 minutes.
+# S1 online status
+routine  data.s1.boot_time              number
+routine  data.s1.console_user           string
+# S2 resource use of the whole machine
+routine  data.s2.cpu_user               number
+routine  data.s2.cpu_sys                number
+routine  data.s2.cpu_idle               number
+routine  data.s2.load1                  number
+routine  data.s2.mem_total              number
+routine  data.s2.mem_used               number
+routine  data.s2.disk_total_kb          number
+routine  data.s2.disk_used_kb           number
+routine  data.s2.disk_avail_kb          number
+routine  data.s2.gpu_util               number
+routine  data.s2.net_in_bytes           number
+routine  data.s2.net_out_bytes          number
+# S3 the 10 programs using the most CPU
+routine  data.s3[].name                 string
+routine  data.s3[].user                 string
+routine  data.s3[].cpu                  number
+routine  data.s3[].rss_kb               number
+routine  data.s3[].bytes_in             number
+routine  data.s3[].bytes_out            number
+# S4 programs accepting connections
+routine  data.s4[].name                 string
+routine  data.s4[].user                 string
+routine  data.s4[].proto                string
+routine  data.s4[].port                 number
+routine  data.s4[].scope                string
+# S5 connection summary per program (no addresses)
+routine  data.s5[].name                 string
+routine  data.s5[].user                 string
+routine  data.s5[].conns                number
+routine  data.s5[].remotes              number
+routine  data.s5[].syn_sent             number
+routine  data.s5[].ports[].port         number
+routine  data.s5[].ports[].n            number
+routine  data.s5[].ports_other          number
+routine  data.s5[].api                  number
+routine  data.s5[].api_signer           string
+routine  data.s5[].api_allowed          bool
+# S6 programs that start automatically
+routine  data.s6.customer_agents[]      string
+routine  data.s6.system_agents[]        string
+routine  data.s6.system_daemons[]       string
+routine  data.s6.btm[].uid              number
+routine  data.s6.btm[].name             string
+routine  data.s6.btm[].team             string
+routine  data.s6.btm[].type             string
+routine  data.s6.btm[].enabled          bool
+# S7 components we installed and system settings
+routine  data.s7.uu_daemon              bool
+routine  data.s7.uu_agent               bool
+routine  data.s7.claude_present         bool
+routine  data.s7.claude_signed          bool
+routine  data.s7.apps[].name            string
+routine  data.s7.apps[].present         bool
+routine  data.s7.apps[].signed          bool
+routine  data.s7.system                 string
+routine  data.s7.sysext[].team          string
+routine  data.s7.sysext[].bundle        string
+routine  data.s7.sysext[].state         string
+routine  data.s7.mdm_enrolled           bool
+routine  data.s7.dep_enrolled           bool
+routine  data.s7.proxy.http             bool
+routine  data.s7.proxy.https            bool
+routine  data.s7.proxy.socks            bool
+routine  data.s7.proxy.pac              bool
+routine  data.s7.proxy.auto             bool
+routine  data.s7.failed[]               string
+# Whether this machine sends its records anywhere.
+routine  data.upload_configured         bool
+
+# Every hour: S9 system events, fixed fields only.
+events   data.since                     string
+events   data.until                     string
+events   data.events[].t                string
+events   data.events[].type             string
+events   data.events[].account          string
+events   data.events[].right            string
+events   data.dropped                   number
+
+# When an alert is raised or cleared. Alerts only tell a person to look.
+alert    data.alert                     string
+alert    data.state                     string
+alert    data.category                  string
+alert    data.name                      string
+alert    data.user                      string
+alert    data.value                     number
+alert    data.list                      string
+alert    data.check                     string
+
+# Once a day: the fingerprint of the previous day's record file.
+daily    data.date                      string
+daily    data.file_sha256               string
+daily    data.lines                     number
+daily    data.ots                       string
+daily    data.tsa                       string
+
+# Only with an option on: more about the one program an alert is about.
+detail   data.alert                     string  DETAIL_ADDRESSES,DETAIL_FINGERPRINT
+detail   data.name                      string  DETAIL_ADDRESSES,DETAIL_FINGERPRINT
+detail   data.user                      string  DETAIL_ADDRESSES,DETAIL_FINGERPRINT
+detail   data.remotes[].addr            string  DETAIL_ADDRESSES
+detail   data.remotes[].port            number  DETAIL_ADDRESSES
+detail   data.remotes[].n               number  DETAIL_ADDRESSES
+detail   data.sha256                    string  DETAIL_FINGERPRINT

@@ -12,7 +12,13 @@
 #
 # The stubs for privileged tools refuse to change anything unless they were
 # started through the sudo stub, so a script that forgets sudo fails here
-# the way it would on a real Mac.
+# the way it would on a real Mac. The sudo stub itself refuses an account
+# that is not an administrator, as a standard account's sudo does.
+#
+# The fake Mac has three accounts, each with its own home under homes/:
+# the machine owner howard (501, administrator), the customer v2cc (502,
+# standard account) and the platform maintenance administrator v2ccops
+# (503). Scripts run as v2ccops unless a test says otherwise (become).
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP_ROOT="$(mktemp -d)"
@@ -23,6 +29,8 @@ tests_failed=0
 current_test=""
 current_failed=0
 SB=""
+AH=""
+CH=""
 out=""
 rc=0
 
@@ -82,38 +90,58 @@ write_stub() {
 
 new_sandbox() {
   SB="$TMP_ROOT/sb$tests_run"
+  AH="$SB/homes/v2ccops"
+  CH="$SB/homes/v2cc"
   mkdir -p "$SB/root/tmp" "$SB/root/run" "$SB/root/nix/var/nix/profiles" \
-    "$SB/home" "$SB/state" "$SB/store" "$SB/bin" "$SB/late" "$SB/repo"
+    "$SB/homes/howard" "$AH" "$CH" "$SB/state" "$SB/store" "$SB/bin" "$SB/late" "$SB/repo"
   : >"$SB/calls.log"
   cp -R "$REPO_ROOT"/*.sh "$REPO_ROOT/lib" "$REPO_ROOT/tools" "$REPO_ROOT/modules" \
-    "$REPO_ROOT/flake.nix" "$SB/repo/"
+    "$REPO_ROOT/monitor" "$REPO_ROOT/flake.nix" "$SB/repo/"
 
-  # A blank Apple Silicon Mac, in a fresh administrator account named v2cc.
-  echo v2cc >"$SB/state/user"
-  echo 502 >"$SB/state/uid"
-  echo "staff admin" >"$SB/state/groups"
-  printf 'howard\nv2cc\n' >"$SB/state/known_users"
+  # A blank Apple Silicon Mac: the owner's account, the customer's standard
+  # account, and the platform maintenance administrator running the setup.
+  printf '%s\n' 'howard 501 staff admin' 'v2cc 502 staff' 'v2ccops 503 staff admin' \
+    >"$SB/state/accounts"
+  echo v2ccops >"$SB/state/user"
   echo arm64 >"$SB/state/arch"
   echo 27.2 >"$SB/state/macos"
   echo 200 >"$SB/state/free_gb"
-  echo v2cc >"$SB/state/brew_owner"
+  # No /opt/homebrew yet; this is who will own it once it exists.
+  echo none >"$SB/state/brew_owner"
   # Power settings as a Mac mini has them out of the box, FileVault on.
   printf 'c %s\n' 'displaysleep 10' 'womp 1' 'sleep 1' 'autorestart 0' 'disksleep 10' >"$SB/state/pmset"
   printf '%s\n' displaysleep disksleep sleep womp autorestart >"$SB/state/pmset_caps"
   echo "FileVault is On." >"$SB/state/filevault"
   echo immediate >"$SB/state/screenlock"
   echo "root:600" >"$SB/state/kcpassword_mode"
+  echo "root:600" >"$SB/state/credential_mode"
+  echo v2cc >"$SB/state/console_user"
+  monitor_fixtures
 
   write_stub "$SB/bin/uname" <<'EOF'
 case "$1" in -s) echo Darwin ;; -m) cat "$SB/state/arch" ;; esac
 EOF
+  # Under the sudo stub the account is root, as under the real sudo.
+  # id: the current account is state/user; state/uid overrides its uid.
   write_stub "$SB/bin/id" <<'EOF'
+if [ "${STUB_AS_ROOT:-}" = 1 ]; then
+  case "$*" in -u) echo 0; exit 0 ;; -un) echo root; exit 0 ;; esac
+fi
+me="$(cat "$SB/state/user")"
+field() { awk -v n="$1" -v f="$2" '$1 == n { if (f == 2) print $2; else { for (i = 3; i <= NF; i++) printf "%s%s", $i, (i < NF ? " " : "\n") } }' "$SB/state/accounts"; }
+known() { awk -v n="$1" '$1 == n { found = 1 } END { exit !found }' "$SB/state/accounts"; }
+[ "${1:-}" != "--" ] || shift
 case "$*" in
-  -un) cat "$SB/state/user" ;;
-  -u) cat "$SB/state/uid" ;;
-  -Gn) cat "$SB/state/groups" ;;
+  -un) echo "$me" ;;
+  -u) if [ -e "$SB/state/uid" ]; then cat "$SB/state/uid"; else field "$me" 2; fi ;;
+  -Gn) field "$me" 3 ;;
+  -Gn\ *)
+    for name; do :; done
+    known "$name" || { echo "id: $name: no such user" >&2; exit 1; }
+    field "$name" 3 ;;
   *) for name; do :; done
-     grep -Fxq -- "$name" "$SB/state/known_users" && echo 501 ;;
+     known "$name" || { echo "id: $name: no such user" >&2; exit 1; }
+     field "$name" 2 ;;
 esac
 EOF
   write_stub "$SB/bin/sw_vers" <<'EOF'
@@ -142,9 +170,15 @@ case "$1" in
       mkdir -p "$clt/usr/bin" && : >"$clt/usr/bin/git" ;;
 esac
 EOF
-  # sudo: record, drop sudo's own flags, run the command inside the sandbox.
+  # sudo: record, refuse a standard account, drop sudo's own flags, run the
+  # command inside the sandbox.
   write_stub "$SB/bin/sudo" <<'EOF'
 echo "sudo $*" >>"$SB/calls.log"
+me="$(cat "$SB/state/user")"
+if ! awk -v n="$me" '$1 == n { for (i = 3; i <= NF; i++) if ($i == "admin") ok = 1 } END { exit !ok }' "$SB/state/accounts"; then
+  echo "Sorry, user $me may not run sudo on stub-mac." >&2
+  exit 1
+fi
 while [ $# -gt 0 ]; do
   case "$1" in
     -v) exit 0 ;;
@@ -158,13 +192,15 @@ done
 STUB_AS_ROOT=1 exec "$@"
 EOF
   write_stub "$SB/bin/curl" <<'EOF'
-dest="" url="" config_on_stdin=0 dump_headers=0
+dest="" url="" config_on_stdin=0 dump_headers=0 wfmt="" body=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -o) dest="$2"; shift ;;
     -K) [ "$2" = "-" ] && config_on_stdin=1; shift ;;
     -D) dump_headers=1; shift ;;
-    --proto) shift ;;
+    -w) wfmt="$2"; shift ;;
+    --data-binary) body="${2#@}"; shift ;;
+    --proto | -X | -H | --max-time) shift ;;
     http*) url="$1" ;;
   esac
   shift
@@ -172,6 +208,22 @@ done
 echo "curl $url" >>"$SB/calls.log"
 [ "$config_on_stdin" = 0 ] || cat >"$SB/state/curl_stdin"
 [ ! -e "$SB/state/network_down" ] || exit 6
+# The monitor's test services: an S3-compatible store that never
+# overwrites, an OpenTimestamps calendar and an RFC 3161 service.
+code() { [ -z "$wfmt" ] || printf '%s' "$1"; }
+case "$url" in
+  https://store.test/*)
+    object="$SB/state/uploads/${url#https://store.test/}"
+    if [ -e "$SB/state/upload_code" ]; then code "$(cat "$SB/state/upload_code")"
+    elif [ -e "$object" ]; then code 412
+    else mkdir -p "$(dirname "$object")" && cp "$body" "$object" && cp "$SB/state/curl_stdin" "$object.headers" && code 200
+    fi
+    exit 0 ;;
+  https://ots.test/digest)
+    cp "$body" "$SB/state/ots_digest"; printf 'OTS-ANSWER' >"$dest"; code 200; exit 0 ;;
+  https://tsa.test/tsr)
+    cp "$body" "$SB/state/tsa_request"; printf '0\202TSA-ANSWER' >"$dest"; code 200; exit 0 ;;
+esac
 case "$url" in
   https://api.github.com/*)
     [ "$dump_headers" = 1 ] &&
@@ -201,9 +253,22 @@ else
   exec /usr/bin/shasum "$@"
 fi
 EOF
+  # chown: only /opt/homebrew is ever handed over; the sandbox cannot
+  # really give a file away, so the new owner is what stat reports.
+  write_stub "$SB/bin/chown" <<'EOF'
+echo "chown $*" >>"$SB/calls.log"
+[ "${STUB_AS_ROOT:-}" = 1 ] || { echo "chown: Operation not permitted" >&2; exit 1; }
+[ "$1" = "-R" ] && shift
+[ ! -e "$SB/state/chown_fails" ] || { echo "chown: simulated failure" >&2; exit 1; }
+case "$2" in */opt/homebrew) echo "${1%%:*}" >"$SB/state/brew_owner" ;; esac
+EOF
   write_stub "$SB/bin/stat" <<'EOF'
 if [ "$1" = "-f" ] && [ "$2" = "%Su" ]; then
+  case "$3" in */dev/console) cat "$SB/state/console_user"; exit 0 ;; esac
+  [ -e "$3" ] || { echo "stat: $3: stat: No such file or directory" >&2; exit 1; }
   cat "$SB/state/brew_owner"
+elif [ "$1" = "-f" ] && [ "$2" = "%Su:%Lp" ] && [ "${3##*/}" = upload-credential ]; then
+  [ -e "$3" ] && cat "$SB/state/credential_mode"
 elif [ "$1" = "-f" ] && [ "$2" = "%Su:%Lp" ]; then
   # The sandbox cannot create a root-owned file; say what the test set.
   [ -e "$3" ] && cat "$SB/state/kcpassword_mode"
@@ -216,6 +281,20 @@ echo "launchctl $*" >>"$SB/calls.log"
 case "$1 $2" in
   "print system/com.netease.uuremote.daemon" | print\ gui/*/com.netease.uuremote.agent)
     [ -e "$SB/state/uuremote" ] ;;
+  # The monitor's LaunchDaemon. kickstart runs one round right away, the
+  # way launchd would, as root.
+  "print system/com.v2cc.monitor") [ -e "$SB/state/monitor_loaded" ] ;;
+  "bootstrap system")
+    [ "${STUB_AS_ROOT:-}" = 1 ] || { echo "launchctl: Bootstrap failed: 1: Operation not permitted" >&2; exit 1; }
+    [ "$3" = "$SB/root/Library/LaunchDaemons/com.v2cc.monitor.plist" ] && [ -e "$3" ] && touch "$SB/state/monitor_loaded" ;;
+  "bootout system/com.v2cc.monitor")
+    [ "${STUB_AS_ROOT:-}" = 1 ] || exit 1
+    rm -f "$SB/state/monitor_loaded" ;;
+  "kickstart -k")
+    [ "${STUB_AS_ROOT:-}" = 1 ] || exit 1
+    [ "$3" = system/com.v2cc.monitor ] && [ -e "$SB/state/monitor_loaded" ] || exit 113
+    V2CC_SYSROOT="$SB/root" /bin/bash "$SB/root/Library/Application Support/V2CC/monitor/v2cc-monitor" run \
+      >>"$SB/state/monitor_runs.log" 2>&1 ;;
   print\ *) [ -e "$SB/root/run/current-system" ] ;;
 esac
 EOF
@@ -227,6 +306,7 @@ state="$SB/state/pmset"
 case "$1" in
   -g)
     case "$2" in
+      log) cat "$SB/state/mon/pmsetlog" ;;
       custom)
         [ ! -e "$SB/state/pmset_unreadable" ] || exit 0
         for src in b c u; do
@@ -277,7 +357,11 @@ echo "fdesetup $*" >>"$SB/calls.log"
 [ "$1" = status ] && cat "$SB/state/filevault"
 EOF
   write_stub "$SB/bin/sysctl" <<'EOF'
-[ "$*" = "-n kern.boottime" ] && echo "{ sec = 1795200000, usec = 0 } Fri Nov 20 12:00:00 2026"
+case "$*" in
+  "-n kern.boottime") echo "{ sec = 1795200000, usec = 0 } Fri Nov 20 12:00:00 2026" ;;
+  "-n hw.memsize") echo 17179869184 ;;
+  *) exit 1 ;;
+esac
 EOF
   # sysadminctl: like the real one it answers through the system log format
   # on stderr, and it asks for the password itself, on the terminal. The
@@ -361,6 +445,8 @@ EOF
 echo "brew-installer NONINTERACTIVE=${NONINTERACTIVE:-}" >>"$SB/calls.log"
 [ ! -e "$SB/state/brew_install_fails" ] || exit 1
 mkdir -p "$SB/root/opt/homebrew/bin"
+# The real installer leaves the prefix to the account running it.
+cat "$SB/state/user" >"$SB/state/brew_owner"
 printf '#!/bin/bash\necho "Homebrew 5.0.0"\n' >"$SB/root/opt/homebrew/bin/brew"
 chmod +x "$SB/root/opt/homebrew/bin/brew"
 EOF
@@ -371,8 +457,9 @@ printf '#!/bin/bash\necho "2.1.0 (Claude Code)"\n' >"$HOME/.local/bin/claude"
 chmod +x "$HOME/.local/bin/claude"
 EOF
 
-  # By default the configuration built for this machine manages v2cc only.
-  make_system fresh v2cc "v2cc=gen-v2cc"
+  # By default the configuration built for this machine manages v2cc only,
+  # deployed from v2ccops, which became the primary user.
+  make_system fresh v2ccops "v2cc=gen-v2cc"
   add_always_on fresh
   system_path fresh >"$SB/state/new_system"
 }
@@ -388,7 +475,8 @@ link_target() { (cd -P "$1" 2>/dev/null && pwd -P); }
 # script only mentions its own path in the systemConfig= line and makes
 # itself /run/current-system as its last step. The closure it "depends on"
 # (what nix-store --query --requisites prints) is itself, the Home Manager
-# generations and any extra packages.
+# generations and any extra packages. It records v2cc as the customer
+# account when v2cc is one of its accounts (see legacy_system).
 make_system() {
   local name="$1" primary="$2" pairs="$3" dir pair user gen wrapper tool
   shift 3
@@ -396,7 +484,8 @@ make_system() {
   mkdir -p "$dir/etc/profiles/per-user" "$dir/sw/bin" "$SB/store/wrappers" \
     "$dir/Library/LaunchDaemons" "$dir/user/Library/LaunchAgents"
   : >"$dir/Library/LaunchDaemons/org.nixos.activate-system.plist"
-  for tool in git node darwin-rebuild; do
+  printf '{"darwinLabel":"stub-%s"}\n' "$name" >"$dir/darwin-version.json"
+  for tool in git node python3 uv darwin-rebuild; do
     printf '#!/bin/bash\necho "%s 1.0"\n' "$tool" >"$dir/sw/bin/$tool"
     chmod +x "$dir/sw/bin/$tool"
   done
@@ -424,13 +513,29 @@ make_system() {
       printf 'echo Activating home-manager configuration for %s >&2\n' "$user"
       printf 'launchctl asuser "$(id -u %s)" sudo -u %s --set-home %s\n' \
         "$user" "$user" "$wrapper"
-      printf 'if [ "$(id -un)" = %s ]; then mkdir -p "$HOME/.local/state/home-manager/gcroots" && ln -sfn %q "$HOME/.local/state/home-manager/gcroots/current-home"; fi\n' \
-        "$user" "$gen"
+      # Home Manager activates as that account, in that account's home.
+      printf 'mkdir -p %q && ln -sfn %q %q\n' \
+        "$SB/homes/$user/.local/state/home-manager/gcroots" "$gen" \
+        "$SB/homes/$user/.local/state/home-manager/gcroots/current-home"
+      [ "$user" != v2cc ] || { mkdir -p "$dir/etc/v2cc" && echo v2cc >"$dir/etc/v2cc/customer"; }
     done
     printf 'ln -sfn "$systemConfig" %q\n' "$SB/root/run/current-system"
   } >"$dir/activate"
   chmod +x "$dir/activate"
 }
+
+# A system built by an earlier version of this repository: no customer
+# account recorded.
+legacy_system() { rm -rf "$SB/store/$1/etc/v2cc"; }
+
+# Switch the account the scripts run as.
+become() { echo "$1" >"$SB/state/user"; }
+# Give an account other groups, e.g. "staff admin" or "staff".
+set_groups() {
+  awk -v n="$1" -v g="$2" '$1 == n { print $1, $2, g; next } { print }' "$SB/state/accounts" >"$SB/state/accounts.new"
+  mv "$SB/state/accounts.new" "$SB/state/accounts"
+}
+home_of() { printf '%s' "$SB/homes/$1"; }
 
 # What this repository builds today: the fake system NAME plus the real
 # always-on activation step (modules/always-on.sh), with comment lines
@@ -464,15 +569,18 @@ have_nix() {
   cp "$SB/late/nix" "$SB/late/nix-env" "$SB/late/nix-store" "$SB/root/nix/var/nix/profiles/default/bin/"
   : >"$SB/root/nix/receipt.json"
 }
+# have_brew [OWNER]: a Homebrew that is already there, the customer's unless
+# said otherwise.
 have_brew() {
+  echo "${1:-v2cc}" >"$SB/state/brew_owner"
   mkdir -p "$SB/root/opt/homebrew/bin"
   printf '#!/bin/bash\necho "Homebrew 5.0.0"\n' >"$SB/root/opt/homebrew/bin/brew"
   chmod +x "$SB/root/opt/homebrew/bin/brew"
 }
 have_claude() {
-  mkdir -p "$SB/home/.local/bin"
-  printf '#!/bin/bash\necho "2.1.0 (Claude Code)"\n' >"$SB/home/.local/bin/claude"
-  chmod +x "$SB/home/.local/bin/claude"
+  mkdir -p "$CH/.local/bin"
+  printf '#!/bin/bash\necho "2.1.0 (Claude Code)"\n' >"$CH/.local/bin/claude"
+  chmod +x "$CH/.local/bin/claude"
 }
 
 # run SCRIPT [ARGS...]: run one of the sandboxed scripts with a clean
@@ -487,7 +595,7 @@ run() {
   shift
   # shellcheck disable=SC2086
   out="$([ -z "$RUN_UMASK" ] || umask "$RUN_UMASK"
-    env -i PATH="$RUN_PATH$SB/bin:/usr/bin:/bin:/usr/sbin:/sbin" HOME="$SB/home" \
+    env -i PATH="$RUN_PATH$SB/bin:/usr/bin:/bin:/usr/sbin:/sbin" HOME="$SB/homes/$(cat "$SB/state/user")" \
       V2CC_SYSROOT="$SB/root" LC_ALL=en_US.UTF-8 $RUN_ENV \
       /bin/bash "$SB/repo/$script" "$@" 2>&1 </dev/null)"
   rc=$?
@@ -526,7 +634,7 @@ run_tty() {
     LC_ALL=en_US.UTF-8 /usr/bin/expect -c "
     set timeout 20
     if {[catch {
-      spawn -noecho env -i PATH=$SB/bin:/usr/bin:/bin:/usr/sbin:/sbin HOME=$SB/home \
+      spawn -noecho env -i PATH=$SB/bin:/usr/bin:/bin:/usr/sbin:/sbin HOME=$SB/homes/$(cat "$SB/state/user") \
         V2CC_SYSROOT=$SB/root LC_ALL=en_US.UTF-8 $RUN_ENV /bin/bash $SB/repo/$script $*
       $dialog
       expect eof
@@ -541,3 +649,144 @@ run_tty() {
 # A GitHub token-shaped string, assembled at run time so that no
 # token-shaped literal is ever committed.
 fake_token() { printf 'gh%s_%s' p "$(printf 'A%.0s' 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36)"; }
+
+# ------------------------------------------------------------------ monitor
+#
+# What the system tools the monitor reads say on the fake Mac. Every tool is
+# a stub that prints a file under state/mon/ and logs how it was called, so
+# tests can change what the machine "shows" and see what was asked. The
+# fixtures carry things the monitor must never record: a file path and an
+# argument marked PRIVATE-MARK, remote addresses, a hardware address, web
+# addresses and application names in log messages.
+monitor_fixtures() {
+  local m="$SB/state/mon"
+  mkdir -p "$m" "$CH/Library/LaunchAgents" "$SB/root/Library/LaunchDaemons" "$SB/root/Library/LaunchAgents"
+  printf 'PRIVATE-MARK file contents\n' >"$CH/Library/LaunchAgents/com.example.helper.plist"
+  cat >"$m/ps" <<'EOF'
+    1 root               0.1  19552 /sbin/launchd
+  210 v2cc               3.2  50000 /Users/v2cc/PRIVATE-MARK-project/bin/devserver
+  211 v2cc               0.5  20000 /Users/v2cc/.local/bin/claude
+  212 v2cc               0.1   9000 /opt/homebrew/bin/node
+  300 v2ccops            0.0   1000 /bin/zsh
+EOF
+  cat >"$m/nettop" <<'EOF'
+,bytes_in,bytes_out,
+launchd.1,0,0,
+devserver.210,1000,2000,
+claude.211,5000,6000,
+EOF
+  printf 'p210\ncdevserver\nLv2cc\nf5\nPTCP\nn*:3000\nTST=LISTEN\nf6\nPTCP\nn127.0.0.1:3001\nTST=LISTEN\nf7\nPTCP\nn192.168.1.20:52000->203.0.113.7:443\nTST=ESTABLISHED\np211\ncclaude\nLv2cc\nf8\nPTCP\nn192.168.1.20:52001->160.79.104.10:443\nTST=ESTABLISHED\np212\ncnode\nLv2cc\nf9\nPTCP\nn[2001:db8::5]:52002->[2607:6bc0::10]:443\nTST=ESTABLISHED\nf10\nUDP\nn*:5353\n' >"$m/lsof"
+  printf 'Processes: 300 total\nLoad Avg: 1.50, 1.20, 1.00 \nCPU usage: 3.31%% user, 8.27%% sys, 88.41%% idle \n' >"$m/top"
+  printf 'Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free:     1000.\nPages active:   2000.\nPages wired down:   500.\nPages occupied by compressor:  100.\n' >"$m/vm_stat"
+  printf '| |   "Device Utilization %%"=5\n' >"$m/ioreg"
+  printf 'Name Mtu Network Address Ipkts Ierrs Ibytes Opkts Oerrs Obytes Coll\nlo0 16384 <Link#1> 10 0 999 10 0 999 0\nen0 1500 <Link#11> aa:bb:cc:dd:ee:ff 100 0 123456 50 0 654321 0\n' >"$m/netstat"
+  printf '<dictionary> {\n  HTTPEnable : 0\n  FTPPassive : 1\n}\n' >"$m/scutil"
+  printf '1 extension(s)\nenabled\tactive\tteamID\tbundleID (version)\tname\t[state]\n*\t*\tW5364U7YZB\tio.tailscale.ipn.macsys.network-extension (1.104.5/101.104.5)\tTailscale Network Extension\t[activated enabled]\n' >"$m/sysext"
+  printf 'Enrolled via DEP: No\nMDM enrollment: No\n' >"$m/profiles"
+  cat >"$m/btm" <<'EOF'
+========================
+ Records for UID 502 : 7F2A
+========================
+
+ Items:
+
+ #1:
+                 UUID: 1234
+                 Name: Example Helper
+       Developer Name: Example Inc
+      Team Identifier: ABCDE12345
+                 Type: developer (0x20)
+          Disposition: [enabled, allowed, visible, notified] (0xb)
+           Identifier: com.example.helper
+                  URL: file:///Users/v2cc/PRIVATE-MARK-project/helper.plist
+      Executable Path: /Users/v2cc/PRIVATE-MARK-project/helper
+EOF
+  cat >"$m/last" <<'EOF'
+v2cc       ttys000                         Fri Nov 27 09:10   still logged in
+v2cc       console                         Fri Nov 27 09:00   still logged in
+reboot time                                Fri Nov 27 08:59
+EOF
+  : >"$m/pmsetlog"
+  cat >"$m/logshow" <<'EOF'
+{"timestamp":"2026-11-27 09:30:00.123456-0600","processImagePath":"\/usr\/libexec\/sshd-session","eventMessage":"Accepted publickey for v2cc from 198.51.100.9 port 50000 ssh2"}
+{"timestamp":"2026-11-27 09:31:00.000000-0600","processImagePath":"\/System\/Library\/Frameworks\/Security.framework\/Versions\/A\/XPCServices\/authd.xpc\/Contents\/MacOS\/authd","eventMessage":"Succeeded authorizing right 'system.preferences' by client '\/Applications\/PRIVATE-MARK.app' [1] for authorization created by '\/Applications\/PRIVATE-MARK.app' [1] (3,0) (engine 1)"}
+{"timestamp":"2026-11-27 09:32:00.000000-0600","processImagePath":"\/usr\/sbin\/sshd","eventMessage":"Opened https:\/\/example.com\/PRIVATE-MARK for v2cc"}
+EOF
+  # Who signed what, by file name; Claude Code is Anthropic's.
+  echo Q6L2SF6YDW >"$m/signer.claude"
+  echo apple >"$m/signer.launchd"
+
+  local tool
+  for tool in top vm_stat ioreg netstat scutil sfltool last; do
+    write_stub "$SB/bin/$tool" <<EOF
+echo "$tool \$*" >>"\$SB/calls.log"
+case "$tool" in
+  scutil) cat "\$SB/state/mon/scutil" ;;
+  sfltool) cat "\$SB/state/mon/btm" ;;
+  *) cat "\$SB/state/mon/$tool" ;;
+esac
+EOF
+  done
+  write_stub "$SB/bin/ps" <<'EOF'
+echo "ps $*" >>"$SB/calls.log"
+cat "$SB/state/mon/ps"
+EOF
+  write_stub "$SB/bin/nettop" <<'EOF'
+echo "nettop $*" >>"$SB/calls.log"
+cat "$SB/state/mon/nettop"
+EOF
+  # lsof -p PID -a -d txt: the executable of a process, from state/mon/exe.PID.
+  write_stub "$SB/bin/lsof" <<'EOF'
+echo "lsof $*" >>"$SB/calls.log"
+if [ "$1" = -p ]; then
+  [ -e "$SB/state/mon/exe.$2" ] && printf 'p%s\nftxt\nn%s\n' "$2" "$(cat "$SB/state/mon/exe.$2")"
+  exit 0
+fi
+cat "$SB/state/mon/lsof"
+EOF
+  write_stub "$SB/bin/systemextensionsctl" <<'EOF'
+echo "systemextensionsctl $*" >>"$SB/calls.log"
+cat "$SB/state/mon/sysext"
+EOF
+  write_stub "$SB/bin/profiles" <<'EOF'
+echo "profiles $*" >>"$SB/calls.log"
+cat "$SB/state/mon/profiles"
+EOF
+  write_stub "$SB/bin/log" <<'EOF'
+echo "log $*" >>"$SB/calls.log"
+[ "$1" = show ] && cat "$SB/state/mon/logshow"
+EOF
+  write_stub "$SB/bin/dscl" <<'EOF'
+[ "$1 $2" = ". -read" ] && [ "$4" = NFSHomeDirectory ] || exit 1
+printf 'NFSHomeDirectory: %s\n' "$SB/homes/${3#/Users/}"
+EOF
+  # codesign: the signer of a file is state/mon/signer.<file name>, if any.
+  write_stub "$SB/bin/codesign" <<'EOF'
+echo "codesign $*" >>"$SB/calls.log"
+for file; do :; done
+signer="$(cat "$SB/state/mon/signer.${file##*/}" 2>/dev/null)"
+case "$1" in
+  -dv) [ -n "$signer" ] && [ "$signer" != apple ] && echo "TeamIdentifier=$signer" >&2 || echo "TeamIdentifier=not set" >&2 ;;
+  -v)
+    [ -n "$signer" ] || exit 1
+    case "$2" in
+      "-R=anchor apple") [ "$signer" = apple ] ;;
+      -R=*) case "$2" in *"\"$signer\""*) exit 0 ;; *) exit 3 ;; esac ;;
+      *) exit 0 ;;
+    esac ;;
+esac
+EOF
+}
+
+# The monitor as installed on the fake Mac, and one round of it at a given
+# time (epoch seconds), as launchd runs it: as root.
+monitor_prog() { printf '%s' "$SB/root/Library/Application Support/V2CC/monitor/v2cc-monitor"; }
+monitor_records() { printf '%s' "$SB/root/Library/Application Support/V2CC/monitor/records"; }
+monitor_state() { printf '%s' "$SB/root/Library/Application Support/V2CC/monitor/state"; }
+monitor_round() {
+  env -i PATH="$SB/bin:/usr/bin:/bin:/usr/sbin:/sbin" HOME=/var/root V2CC_SYSROOT="$SB/root" \
+    STUB_AS_ROOT=1 V2CC_MONITOR_NOW="$1" LC_ALL=en_US.UTF-8 \
+    /bin/bash "$(monitor_prog)" run >>"$SB/state/monitor_runs.log" 2>&1
+}
+# Every record written so far, in order.
+monitor_all_records() { cat "$(monitor_records)"/*.jsonl 2>/dev/null; }

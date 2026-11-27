@@ -27,6 +27,10 @@ AUTOLOGOUT_KEY="com.apple.autologout.AutoLogOutDelay"
 UPDATE_INSTALL_KEY="AutomaticallyInstallMacOSUpdates"
 
 LOCK_AGENT_LABEL="com.v2cc.lock-after-login"
+# Root-owned and shared by every account's login session; it acts only in
+# the customer account's session. Earlier versions put it in the customer's
+# own ~/Library/LaunchAgents, and the marker still names that path there.
+LOCK_AGENT="$V2CC_SYSROOT/Library/LaunchAgents/$LOCK_AGENT_LABEL.plist"
 
 # True when the system closure applies the always-on settings.
 sys_declares_always_on() {

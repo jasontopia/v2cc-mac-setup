@@ -15,6 +15,13 @@ sys_primary_user() {
     head -n 1 | tr -d "'\""
 }
 
+# The customer account the closure declares (/etc/v2cc/customer once it is
+# active), or nothing for a system built before the customer was recorded.
+sys_customer_user() {
+  [ -n "$1" ] || return 0
+  sed -n '1p' "$1/etc/v2cc/customer" 2>/dev/null || true
+}
+
 # Accounts whose Home Manager configuration the closure activates.
 sys_hm_users() {
   sed -n 's/^[[:space:]]*echo Activating home-manager configuration for \(.*\) >&2$/\1/p' \
@@ -89,12 +96,14 @@ first_lines() { printf '%s\n' "$1" | head -n "$2" | tr '\n' ' '; }
 #   - never: change the primary user, stop managing an account, remove a
 #     per-user package environment, a launchd service or a system command;
 #   - unless V2CC_ALLOW_SYSTEM_CHANGES=1 (a deliberate upgrade of the whole
-#     machine): change an account's Home Manager generation, or remove or
-#     change anything else the running closure contains or its activation
-#     script does.
+#     machine): change the recorded customer account, change an account's
+#     Home Manager generation, or remove or change anything else the
+#     running closure contains or its activation script does.
+#
+# Recording a customer account on a system that had none is an addition.
 guard_compare() {
   local cur="$1" new="$2" problems=0 allow="${V2CC_ALLOW_SYSTEM_CHANGES:-0}"
-  local user cur_primary new_primary cur_gen new_gen cur_req new_req lost
+  local user cur_primary new_primary cur_customer new_customer cur_gen new_gen cur_req new_req lost
 
   if [ -z "$cur" ]; then
     return 0
@@ -109,6 +118,14 @@ guard_compare() {
   if [ -n "$cur_primary" ] && [ "$cur_primary" != "$new_primary" ]; then
     printf '主用户 system.primaryUser 将从「%s」变为「%s」：Homebrew、用户级默认设置和 launchd 用户服务会改归另一个账户。\n' \
       "$cur_primary" "${new_primary:-未设置}"
+    problems=1
+  fi
+
+  cur_customer="$(sys_customer_user "$cur")"
+  new_customer="$(sys_customer_user "$new")"
+  if [ -n "$cur_customer" ] && [ "$cur_customer" != "$new_customer" ] && [ "$allow" != "1" ]; then
+    printf '客户账户将从「%s」变为「%s」：自动登录和 Homebrew 都跟着客户账户走。\n' \
+      "$cur_customer" "${new_customer:-未登记}"
     problems=1
   fi
 

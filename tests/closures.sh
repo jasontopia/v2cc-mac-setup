@@ -4,8 +4,9 @@
 #
 # It builds the flake for several machines (owner only, owner + customer,
 # customer only), and for the owner + customer machine also as it was before
-# the always-on settings existed and with one of those settings changed, and
-# inspects the results. `nix build` only fills the Nix store: nothing is
+# the always-on settings existed, before the customer account was recorded,
+# with Homebrew handed to the customer, and with one always-on setting
+# changed, and inspects the results. `nix build` only fills the Nix store: nothing is
 # activated and no account has to exist. Needs Nix and network access; the
 # first run downloads the closure and takes a few minutes.
 set -euo pipefail
@@ -61,9 +62,15 @@ expect() {
   fi
 }
 
-owner="$(build owner '{ primaryUser = "howard"; homebrewUser = "howard"; users = [ "howard" ]; }')"
-coexist="$(build coexist '{ primaryUser = "howard"; homebrewUser = "howard"; users = [ "howard" "v2cc" ]; }')"
-customer="$(build customer '{ primaryUser = "v2cc"; homebrewUser = "v2cc"; users = [ "v2cc" ]; }')"
+# A system built before the customer account was recorded.
+no_record="grep -v 'v2cc/customer' flake.nix >flake.nix.new && mv flake.nix.new flake.nix"
+
+# The owner deployed for their own account before there was a customer.
+owner="$(build owner '{ primaryUser = "howard"; homebrewUser = "howard"; customerUser = "howard"; users = [ "howard" ]; }' "$no_record")"
+coexist="$(build coexist '{ primaryUser = "howard"; homebrewUser = "howard"; customerUser = "v2cc"; users = [ "howard" "v2cc" ]; }')"
+# A blank Mac deployed from the platform maintenance administrator, which is
+# the primary user without being a managed account itself.
+customer="$(build customer '{ primaryUser = "v2ccadmin"; homebrewUser = "v2cc"; customerUser = "v2cc"; users = [ "v2cc" ]; }')"
 printf 'owner only:       %s\nowner + customer: %s\ncustomer only:    %s\n\n' "$owner" "$coexist" "$customer"
 
 expect "owner closure: primary user and Home Manager account are read back" \
@@ -75,6 +82,11 @@ expect "the owner's Home Manager generation is a real store path" \
 expect "adding the customer leaves the owner's Home Manager generation byte-identical" \
   test "$(sys_hm_generation "$owner" howard)" = "$(sys_hm_generation "$coexist" howard)"
 
+expect "the customer account is recorded in the closure, readable as /etc/v2cc/customer" \
+  test "$(sys_customer_user "$coexist")/$(sys_customer_user "$customer")/$(sys_customer_user "$owner")" = "v2cc/v2cc/"
+expect "customer only: the platform administrator is the primary user, the customer the only managed account" \
+  test "$(sys_primary_user "$customer")/$(sys_hm_users "$customer" | tr '\n' ' ')" = "v2ccadmin/v2cc "
+
 expect "guard accepts owner -> owner + customer" \
   guard_compare "$owner" "$coexist"
 
@@ -83,7 +95,7 @@ printf '%s\n' "$refused" | sed 's/^/     | /'
 expect "guard refuses owner -> customer only: owner would be removed" \
   grep -Fq '账户「howard」的 Home Manager 配置将被移除' <<<"$refused"
 expect "guard refuses owner -> customer only: primary user would change" \
-  grep -Fq '主用户 system.primaryUser 将从「howard」变为「v2cc」' <<<"$refused"
+  grep -Fq '主用户 system.primaryUser 将从「howard」变为「v2ccadmin」' <<<"$refused"
 
 refused="$(guard_compare "$coexist" "$owner" || true)"
 expect "guard refuses owner + customer -> owner only: customer would be removed" \
@@ -95,7 +107,7 @@ expect "guard refuses owner + customer -> owner only: customer would be removed"
 # this repository built before the always-on module existed. That earlier
 # system is rebuilt here by taking the module out of the flake.
 
-machine='{ primaryUser = "howard"; homebrewUser = "howard"; users = [ "howard" "v2cc" ]; }'
+machine='{ primaryUser = "howard"; homebrewUser = "howard"; customerUser = "v2cc"; users = [ "howard" "v2cc" ]; }'
 before="$(build before "$machine" \
   "grep -v 'modules/always-on.nix' flake.nix >flake.nix.new && mv flake.nix.new flake.nix")"
 changed="$(build changed "$machine" \
@@ -138,5 +150,36 @@ expect "guard accepts the changed value only when changes are explicitly allowed
 refused="$(guard_compare "$coexist" "$before" || true)"
 expect "guard refuses taking always-on out again by redeploying" \
   grep -Fq '当前系统的激活步骤中有' <<<"$refused"
+
+# ------------------------------------------------------- the customer record
+#
+# Machines delivered before the customer account became a standard account
+# run a system without the record (see docs/ONBOARDING.md, section 15).
+
+legacy="$(build legacy "$machine" "$no_record")"
+handed="$(build handed '{ primaryUser = "howard"; homebrewUser = "v2cc"; customerUser = "v2cc"; users = [ "howard" "v2cc" ]; }')"
+other="$(build other '{ primaryUser = "howard"; homebrewUser = "howard"; customerUser = "howard"; users = [ "howard" "v2cc" ]; }')"
+printf '\nwithout record:    %s\nHomebrew handed:   %s\nother customer:    %s\n\n' "$legacy" "$handed" "$other"
+
+expect "guard accepts recording the customer on a system that had none, as purely additive" \
+  guard_compare "$legacy" "$coexist"
+expect "recording the customer removes or changes no line of the activation script" \
+  test -z "$(missing_from "$(activate_lines "$legacy")" "$(activate_lines "$coexist")")"
+expect "recording the customer leaves both Home Manager generations byte-identical" \
+  test "$(sys_hm_generation "$legacy" howard)/$(sys_hm_generation "$legacy" v2cc)" = "$(sys_hm_generation "$coexist" howard)/$(sys_hm_generation "$coexist" v2cc)"
+
+refused="$(guard_compare "$coexist" "$other" || true)"
+printf '%s\n' "$refused" | sed 's/^/     | /'
+expect "guard refuses changing the recorded customer" \
+  grep -Fq '客户账户将从「v2cc」变为「howard」' <<<"$refused"
+
+# Handing the owner's Homebrew to the customer (section 15, M5) changes the
+# account the Homebrew step of the activation runs as.
+refused="$(guard_compare "$coexist" "$handed" || true)"
+printf '%s\n' "$refused" | sed 's/^/     | /'
+expect "guard refuses a change of Homebrew's owner unless changes are explicitly allowed" \
+  grep -Fq '当前系统的激活步骤中有' <<<"$refused"
+expect "the change of Homebrew's owner is accepted when changes are explicitly allowed" \
+  env V2CC_ALLOW_SYSTEM_CHANGES=1 /bin/bash -c ". '$repo_root/lib/system-guard.sh'; guard_compare '$coexist' '$handed'"
 
 exit "$failed"

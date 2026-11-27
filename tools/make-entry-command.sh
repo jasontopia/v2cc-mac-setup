@@ -1,12 +1,19 @@
 #!/bin/bash
 #
-# Operator side: print the one command a customer account runs to set up
-# its Mac.
+# Operator side: print the one command that sets up a Mac, for one of the
+# two accounts that take part.
 #
-#   tools/make-entry-command.sh [--dry-run] [git-ref]      (default: main)
+#   tools/make-entry-command.sh [--dry-run] --customer <account> [git-ref]
+#       for the platform maintenance administrator account: runs
+#       bootstrap.sh for that customer account (system part)
+#   tools/make-entry-command.sh [--dry-run] [git-ref]
+#       the same, for a machine whose system already records its customer
+#   tools/make-entry-command.sh [--dry-run] --customer-setup [git-ref]
+#       for the customer's standard account: runs customer-setup.sh
 #
-# With --dry-run the printed command only checks the machine and reports
-# what it would do; it installs and changes nothing.
+# git-ref defaults to main. With --dry-run the printed command only checks
+# the machine and reports what it would do; it installs and changes
+# nothing.
 #
 # Run this on a machine that is already signed in to GitHub with `gh` and
 # can read the private repository. It asks GitHub for a download link to
@@ -26,16 +33,52 @@ set -euo pipefail
 
 repo="${V2CC_REPO:-jasontopia/v2cc-mac-setup}"
 prefix=""
-if [ "${1:-}" = "--dry-run" ]; then
-  prefix="V2CC_DRY_RUN=1 "
-  shift
-fi
-ref="${1:-main}"
+customer=""
+customer_setup=0
+ref=""
 
 die() {
   printf '错误：%s\n' "$*" >&2
   exit 1
 }
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dry-run) prefix="V2CC_DRY_RUN=1 " ;;
+    --customer)
+      [ $# -ge 2 ] || die "--customer 需要客户账户名。"
+      customer="$2"
+      shift
+      ;;
+    --customer-setup) customer_setup=1 ;;
+    -*) die "未知参数：$1" ;;
+    *)
+      [ -z "$ref" ] || die "只能指定一个版本。"
+      ref="$1"
+      ;;
+  esac
+  shift
+done
+ref="${ref:-main}"
+
+if [ "$customer_setup" = "1" ]; then
+  [ -z "$customer" ] || die "--customer-setup 不能和 --customer 一起使用。"
+  script="customer-setup.sh"
+  run_args=""
+  account_text="客户的普通账户（例如 v2cc）"
+else
+  script="bootstrap.sh"
+  run_args=""
+  if [ -n "$customer" ]; then
+    # It ends up in the pasted line: only the characters an account name
+    # may have, never a quote or a space.
+    case "$customer" in
+      '' | *[!a-z0-9_.-]* | -* | .*) die "客户账户名「${customer}」含有不支持的字符。" ;;
+    esac
+    run_args=" --customer $customer"
+  fi
+  account_text="平台维护管理员账户"
+fi
 
 command -v gh >/dev/null 2>&1 || die "需要已登录的 GitHub CLI（gh）。"
 
@@ -66,23 +109,24 @@ esac
 curl --proto '=https' --tlsv1.2 -fsSL "$url" -o "$work_dir/bundle.tgz" ||
   die "下载部署包失败。"
 sha256="$(shasum -a 256 "$work_dir/bundle.tgz" | cut -d' ' -f1)"
-tar -tzf "$work_dir/bundle.tgz" | grep -q '/bootstrap\.sh$' ||
-  die "部署包中没有 bootstrap.sh，$ref 不是可部署的版本。"
+tar -tzf "$work_dir/bundle.tgz" | grep -q "/${script//./\\.}\$" ||
+  die "部署包中没有 ${script}，$ref 不是可部署的版本。"
 
 cat >&2 <<EOF
 仓库：$repo
 版本：$commit
 部署包 SHA-256：$sha256
 
-把下面这一整行发给机主，在新建的管理员账户（例如 v2cc）的「终端」里粘贴运行。
+把下面这一整行发给现场操作的人，在本机的${account_text}的「终端」里粘贴运行。
+它会运行 ${script}${run_args}。
 链接约 5 分钟后失效；过期了重新运行本脚本即可。
 $([ -z "$prefix" ] || printf '这是演练命令：只检查并报告，不安装、不改动系统。')
 
 EOF
 
-# Everything the customer account runs before the bundle is verified is in
-# this one line. It must work when pasted into zsh, so it contains no
+# Everything the account runs before the bundle is verified is in this one
+# line. It must work when pasted into zsh, so it contains no
 # single quotes.
 cat <<EOF
-${prefix}/bin/bash -c 'set -euo pipefail; u="$url"; s="$sha256"; c="$commit"; t="\$HOME/v2cc-mac-setup"; d="\$(mktemp -d)"; trap "rm -rf \\"\$d\\"" EXIT; echo "==> 下载 V2CC 部署包 \${c:0:12}"; curl --proto "=https" --tlsv1.2 -fsSL "\$u" -o "\$d/bundle.tgz" || { echo "错误：下载失败。链接约 5 分钟后失效，请向 V2CC 运营方索取新的入口命令。"; exit 1; }; [ "\$(shasum -a 256 "\$d/bundle.tgz" | cut -d" " -f1)" = "\$s" ] || { echo "错误：部署包完整性校验失败，已中止，没有执行任何内容。"; exit 1; }; mkdir "\$d/src"; tar -xzf "\$d/bundle.tgz" -C "\$d/src" --strip-components 1; echo "\$c" > "\$d/src/.v2cc-commit"; rm -rf "\$t.previous"; [ ! -e "\$t" ] || mv "\$t" "\$t.previous"; mv "\$d/src" "\$t"; rm -rf "\$t.previous"; "\$t/bootstrap.sh"'
+${prefix}/bin/bash -c 'set -euo pipefail; u="$url"; s="$sha256"; c="$commit"; t="\$HOME/v2cc-mac-setup"; d="\$(mktemp -d)"; trap "rm -rf \\"\$d\\"" EXIT; echo "==> 下载 V2CC 部署包 \${c:0:12}"; curl --proto "=https" --tlsv1.2 -fsSL "\$u" -o "\$d/bundle.tgz" || { echo "错误：下载失败。链接约 5 分钟后失效，请向 V2CC 运营方索取新的入口命令。"; exit 1; }; [ "\$(shasum -a 256 "\$d/bundle.tgz" | cut -d" " -f1)" = "\$s" ] || { echo "错误：部署包完整性校验失败，已中止，没有执行任何内容。"; exit 1; }; mkdir "\$d/src"; tar -xzf "\$d/bundle.tgz" -C "\$d/src" --strip-components 1; echo "\$c" > "\$d/src/.v2cc-commit"; rm -rf "\$t.previous"; [ ! -e "\$t" ] || mv "\$t" "\$t.previous"; mv "\$d/src" "\$t"; rm -rf "\$t.previous"; "\$t/$script"$run_args'
 EOF

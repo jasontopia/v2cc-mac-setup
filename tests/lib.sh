@@ -12,7 +12,13 @@
 #
 # The stubs for privileged tools refuse to change anything unless they were
 # started through the sudo stub, so a script that forgets sudo fails here
-# the way it would on a real Mac.
+# the way it would on a real Mac. The sudo stub itself refuses an account
+# that is not an administrator, as a standard account's sudo does.
+#
+# The fake Mac has three accounts, each with its own home under homes/:
+# the machine owner howard (501, administrator), the customer v2cc (502,
+# standard account) and the platform maintenance administrator v2ccadmin
+# (503). Scripts run as v2ccadmin unless a test says otherwise (become).
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP_ROOT="$(mktemp -d)"
@@ -23,6 +29,8 @@ tests_failed=0
 current_test=""
 current_failed=0
 SB=""
+AH=""
+CH=""
 out=""
 rc=0
 
@@ -82,21 +90,24 @@ write_stub() {
 
 new_sandbox() {
   SB="$TMP_ROOT/sb$tests_run"
+  AH="$SB/homes/v2ccadmin"
+  CH="$SB/homes/v2cc"
   mkdir -p "$SB/root/tmp" "$SB/root/run" "$SB/root/nix/var/nix/profiles" \
-    "$SB/home" "$SB/state" "$SB/store" "$SB/bin" "$SB/late" "$SB/repo"
+    "$SB/homes/howard" "$AH" "$CH" "$SB/state" "$SB/store" "$SB/bin" "$SB/late" "$SB/repo"
   : >"$SB/calls.log"
   cp -R "$REPO_ROOT"/*.sh "$REPO_ROOT/lib" "$REPO_ROOT/tools" "$REPO_ROOT/modules" \
     "$REPO_ROOT/flake.nix" "$SB/repo/"
 
-  # A blank Apple Silicon Mac, in a fresh administrator account named v2cc.
-  echo v2cc >"$SB/state/user"
-  echo 502 >"$SB/state/uid"
-  echo "staff admin" >"$SB/state/groups"
-  printf 'howard\nv2cc\n' >"$SB/state/known_users"
+  # A blank Apple Silicon Mac: the owner's account, the customer's standard
+  # account, and the platform maintenance administrator running the setup.
+  printf '%s\n' 'howard 501 staff admin' 'v2cc 502 staff' 'v2ccadmin 503 staff admin' \
+    >"$SB/state/accounts"
+  echo v2ccadmin >"$SB/state/user"
   echo arm64 >"$SB/state/arch"
   echo 27.2 >"$SB/state/macos"
   echo 200 >"$SB/state/free_gb"
-  echo v2cc >"$SB/state/brew_owner"
+  # No /opt/homebrew yet; this is who will own it once it exists.
+  echo none >"$SB/state/brew_owner"
   # Power settings as a Mac mini has them out of the box, FileVault on.
   printf 'c %s\n' 'displaysleep 10' 'womp 1' 'sleep 1' 'autorestart 0' 'disksleep 10' >"$SB/state/pmset"
   printf '%s\n' displaysleep disksleep sleep womp autorestart >"$SB/state/pmset_caps"
@@ -107,13 +118,23 @@ new_sandbox() {
   write_stub "$SB/bin/uname" <<'EOF'
 case "$1" in -s) echo Darwin ;; -m) cat "$SB/state/arch" ;; esac
 EOF
+  # id: the current account is state/user; state/uid overrides its uid.
   write_stub "$SB/bin/id" <<'EOF'
+me="$(cat "$SB/state/user")"
+field() { awk -v n="$1" -v f="$2" '$1 == n { if (f == 2) print $2; else { for (i = 3; i <= NF; i++) printf "%s%s", $i, (i < NF ? " " : "\n") } }' "$SB/state/accounts"; }
+known() { awk -v n="$1" '$1 == n { found = 1 } END { exit !found }' "$SB/state/accounts"; }
+[ "${1:-}" != "--" ] || shift
 case "$*" in
-  -un) cat "$SB/state/user" ;;
-  -u) cat "$SB/state/uid" ;;
-  -Gn) cat "$SB/state/groups" ;;
+  -un) echo "$me" ;;
+  -u) if [ -e "$SB/state/uid" ]; then cat "$SB/state/uid"; else field "$me" 2; fi ;;
+  -Gn) field "$me" 3 ;;
+  -Gn\ *)
+    for name; do :; done
+    known "$name" || { echo "id: $name: no such user" >&2; exit 1; }
+    field "$name" 3 ;;
   *) for name; do :; done
-     grep -Fxq -- "$name" "$SB/state/known_users" && echo 501 ;;
+     known "$name" || { echo "id: $name: no such user" >&2; exit 1; }
+     field "$name" 2 ;;
 esac
 EOF
   write_stub "$SB/bin/sw_vers" <<'EOF'
@@ -142,9 +163,15 @@ case "$1" in
       mkdir -p "$clt/usr/bin" && : >"$clt/usr/bin/git" ;;
 esac
 EOF
-  # sudo: record, drop sudo's own flags, run the command inside the sandbox.
+  # sudo: record, refuse a standard account, drop sudo's own flags, run the
+  # command inside the sandbox.
   write_stub "$SB/bin/sudo" <<'EOF'
 echo "sudo $*" >>"$SB/calls.log"
+me="$(cat "$SB/state/user")"
+if ! awk -v n="$me" '$1 == n { for (i = 3; i <= NF; i++) if ($i == "admin") ok = 1 } END { exit !ok }' "$SB/state/accounts"; then
+  echo "Sorry, user $me may not run sudo on stub-mac." >&2
+  exit 1
+fi
 while [ $# -gt 0 ]; do
   case "$1" in
     -v) exit 0 ;;
@@ -201,8 +228,18 @@ else
   exec /usr/bin/shasum "$@"
 fi
 EOF
+  # chown: only /opt/homebrew is ever handed over; the sandbox cannot
+  # really give a file away, so the new owner is what stat reports.
+  write_stub "$SB/bin/chown" <<'EOF'
+echo "chown $*" >>"$SB/calls.log"
+[ "${STUB_AS_ROOT:-}" = 1 ] || { echo "chown: Operation not permitted" >&2; exit 1; }
+[ "$1" = "-R" ] && shift
+[ ! -e "$SB/state/chown_fails" ] || { echo "chown: simulated failure" >&2; exit 1; }
+echo "${1%%:*}" >"$SB/state/brew_owner"
+EOF
   write_stub "$SB/bin/stat" <<'EOF'
 if [ "$1" = "-f" ] && [ "$2" = "%Su" ]; then
+  [ -e "$3" ] || { echo "stat: $3: stat: No such file or directory" >&2; exit 1; }
   cat "$SB/state/brew_owner"
 elif [ "$1" = "-f" ] && [ "$2" = "%Su:%Lp" ]; then
   # The sandbox cannot create a root-owned file; say what the test set.
@@ -361,6 +398,8 @@ EOF
 echo "brew-installer NONINTERACTIVE=${NONINTERACTIVE:-}" >>"$SB/calls.log"
 [ ! -e "$SB/state/brew_install_fails" ] || exit 1
 mkdir -p "$SB/root/opt/homebrew/bin"
+# The real installer leaves the prefix to the account running it.
+cat "$SB/state/user" >"$SB/state/brew_owner"
 printf '#!/bin/bash\necho "Homebrew 5.0.0"\n' >"$SB/root/opt/homebrew/bin/brew"
 chmod +x "$SB/root/opt/homebrew/bin/brew"
 EOF
@@ -371,8 +410,9 @@ printf '#!/bin/bash\necho "2.1.0 (Claude Code)"\n' >"$HOME/.local/bin/claude"
 chmod +x "$HOME/.local/bin/claude"
 EOF
 
-  # By default the configuration built for this machine manages v2cc only.
-  make_system fresh v2cc "v2cc=gen-v2cc"
+  # By default the configuration built for this machine manages v2cc only,
+  # deployed from v2ccadmin, which became the primary user.
+  make_system fresh v2ccadmin "v2cc=gen-v2cc"
   add_always_on fresh
   system_path fresh >"$SB/state/new_system"
 }
@@ -388,7 +428,8 @@ link_target() { (cd -P "$1" 2>/dev/null && pwd -P); }
 # script only mentions its own path in the systemConfig= line and makes
 # itself /run/current-system as its last step. The closure it "depends on"
 # (what nix-store --query --requisites prints) is itself, the Home Manager
-# generations and any extra packages.
+# generations and any extra packages. It records v2cc as the customer
+# account when v2cc is one of its accounts (see legacy_system).
 make_system() {
   local name="$1" primary="$2" pairs="$3" dir pair user gen wrapper tool
   shift 3
@@ -396,6 +437,7 @@ make_system() {
   mkdir -p "$dir/etc/profiles/per-user" "$dir/sw/bin" "$SB/store/wrappers" \
     "$dir/Library/LaunchDaemons" "$dir/user/Library/LaunchAgents"
   : >"$dir/Library/LaunchDaemons/org.nixos.activate-system.plist"
+  printf '{"darwinLabel":"stub-%s"}\n' "$name" >"$dir/darwin-version.json"
   for tool in git node darwin-rebuild; do
     printf '#!/bin/bash\necho "%s 1.0"\n' "$tool" >"$dir/sw/bin/$tool"
     chmod +x "$dir/sw/bin/$tool"
@@ -424,13 +466,29 @@ make_system() {
       printf 'echo Activating home-manager configuration for %s >&2\n' "$user"
       printf 'launchctl asuser "$(id -u %s)" sudo -u %s --set-home %s\n' \
         "$user" "$user" "$wrapper"
-      printf 'if [ "$(id -un)" = %s ]; then mkdir -p "$HOME/.local/state/home-manager/gcroots" && ln -sfn %q "$HOME/.local/state/home-manager/gcroots/current-home"; fi\n' \
-        "$user" "$gen"
+      # Home Manager activates as that account, in that account's home.
+      printf 'mkdir -p %q && ln -sfn %q %q\n' \
+        "$SB/homes/$user/.local/state/home-manager/gcroots" "$gen" \
+        "$SB/homes/$user/.local/state/home-manager/gcroots/current-home"
+      [ "$user" != v2cc ] || { mkdir -p "$dir/etc/v2cc" && echo v2cc >"$dir/etc/v2cc/customer"; }
     done
     printf 'ln -sfn "$systemConfig" %q\n' "$SB/root/run/current-system"
   } >"$dir/activate"
   chmod +x "$dir/activate"
 }
+
+# A system built by an earlier version of this repository: no customer
+# account recorded.
+legacy_system() { rm -rf "$SB/store/$1/etc/v2cc"; }
+
+# Switch the account the scripts run as.
+become() { echo "$1" >"$SB/state/user"; }
+# Give an account other groups, e.g. "staff admin" or "staff".
+set_groups() {
+  awk -v n="$1" -v g="$2" '$1 == n { print $1, $2, g; next } { print }' "$SB/state/accounts" >"$SB/state/accounts.new"
+  mv "$SB/state/accounts.new" "$SB/state/accounts"
+}
+home_of() { printf '%s' "$SB/homes/$1"; }
 
 # What this repository builds today: the fake system NAME plus the real
 # always-on activation step (modules/always-on.sh), with comment lines
@@ -464,15 +522,18 @@ have_nix() {
   cp "$SB/late/nix" "$SB/late/nix-env" "$SB/late/nix-store" "$SB/root/nix/var/nix/profiles/default/bin/"
   : >"$SB/root/nix/receipt.json"
 }
+# have_brew [OWNER]: a Homebrew that is already there, the customer's unless
+# said otherwise.
 have_brew() {
+  echo "${1:-v2cc}" >"$SB/state/brew_owner"
   mkdir -p "$SB/root/opt/homebrew/bin"
   printf '#!/bin/bash\necho "Homebrew 5.0.0"\n' >"$SB/root/opt/homebrew/bin/brew"
   chmod +x "$SB/root/opt/homebrew/bin/brew"
 }
 have_claude() {
-  mkdir -p "$SB/home/.local/bin"
-  printf '#!/bin/bash\necho "2.1.0 (Claude Code)"\n' >"$SB/home/.local/bin/claude"
-  chmod +x "$SB/home/.local/bin/claude"
+  mkdir -p "$CH/.local/bin"
+  printf '#!/bin/bash\necho "2.1.0 (Claude Code)"\n' >"$CH/.local/bin/claude"
+  chmod +x "$CH/.local/bin/claude"
 }
 
 # run SCRIPT [ARGS...]: run one of the sandboxed scripts with a clean
@@ -487,7 +548,7 @@ run() {
   shift
   # shellcheck disable=SC2086
   out="$([ -z "$RUN_UMASK" ] || umask "$RUN_UMASK"
-    env -i PATH="$RUN_PATH$SB/bin:/usr/bin:/bin:/usr/sbin:/sbin" HOME="$SB/home" \
+    env -i PATH="$RUN_PATH$SB/bin:/usr/bin:/bin:/usr/sbin:/sbin" HOME="$SB/homes/$(cat "$SB/state/user")" \
       V2CC_SYSROOT="$SB/root" LC_ALL=en_US.UTF-8 $RUN_ENV \
       /bin/bash "$SB/repo/$script" "$@" 2>&1 </dev/null)"
   rc=$?
@@ -526,7 +587,7 @@ run_tty() {
     LC_ALL=en_US.UTF-8 /usr/bin/expect -c "
     set timeout 20
     if {[catch {
-      spawn -noecho env -i PATH=$SB/bin:/usr/bin:/bin:/usr/sbin:/sbin HOME=$SB/home \
+      spawn -noecho env -i PATH=$SB/bin:/usr/bin:/bin:/usr/sbin:/sbin HOME=$SB/homes/$(cat "$SB/state/user") \
         V2CC_SYSROOT=$SB/root LC_ALL=en_US.UTF-8 $RUN_ENV /bin/bash $SB/repo/$script $*
       $dialog
       expect eof

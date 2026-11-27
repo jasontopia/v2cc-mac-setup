@@ -119,6 +119,36 @@ valid_username() {
   esac
 }
 
+# True when the named account is an administrator of this Mac.
+is_admin() {
+  id -Gn -- "$1" 2>/dev/null | tr ' ' '\n' | grep -Fxq admin
+}
+
+# Stop unless the account running this is an administrator. The customer
+# account is a standard account and must never get this far.
+require_admin() {
+  local me
+  me="$(id -un)"
+  is_admin "$me" ||
+    die "${1}需要管理员权限，请在平台维护管理员账户里运行。当前账户 ${me} 是普通账户（标准用户），不能用 sudo。"
+}
+
+# The customer account must exist, must be someone other than the account
+# deploying, and must be a standard account: the customer never gets
+# administrator rights on a V2CC Mac.
+check_customer_account() {
+  local customer="$1" me
+  me="$(id -un)"
+  valid_username "$customer" || die "客户账户名「${customer}」含有不支持的字符。"
+  id -u -- "$customer" >/dev/null 2>&1 ||
+    die "本机没有账户「${customer}」。请先由机主在「系统设置 > 用户与群组」里新建这个账户，类型选「普通」（标准用户），再重新运行。"
+  [ "$customer" != "$me" ] ||
+    die "客户账户不能是运行部署的账户 ${me}。部署要在平台维护管理员账户里运行，--customer 指定客户的普通账户。"
+  if is_admin "$customer"; then
+    die "客户账户「${customer}」是管理员。客户账户必须是普通账户（标准用户）：请先取消它的管理员权限（已经交付给客户的机器按 docs/ONBOARDING.md 第 15 节「迁移」操作），再重新运行。"
+  fi
+}
+
 # Print the store path a symlink resolves to, or nothing when it is absent.
 resolve_link() {
   if [ -e "$1" ]; then
@@ -142,18 +172,19 @@ window_sees_claude() {
   PATH="$V2CC_WINDOW_PATH" command -v claude >/dev/null 2>&1
 }
 
-# What `claude` resolves to in a newly opened Terminal window: a login,
+# What EXPR (zsh code) prints in a newly opened Terminal window: a login,
 # interactive zsh started from a clean environment rather than from this
-# shell's PATH. Prints nothing when it does not resolve. A startup file
-# that hangs is cut off after 30 seconds.
-fresh_zsh_claude() {
+# shell's PATH. Prints nothing when it prints nothing there. A startup
+# file that hangs is cut off after 30 seconds.
+fresh_zsh_print() {
   local user
   user="$(id -un)"
-  # The expansion belongs to the fresh shell, not to this one.
-  # shellcheck disable=SC2016
   env -i HOME="$HOME" USER="$user" LOGNAME="$user" SHELL=/bin/zsh \
     TERM="${TERM:-xterm-256color}" PATH=/usr/bin:/bin:/usr/sbin:/sbin \
     /usr/bin/perl -e 'alarm 30; exec @ARGV' \
-    "$ZSH_BIN" -l -i -c 'print -r -- "V2CC_CLAUDE=$(command -v claude)"' \
-    </dev/null 2>/dev/null | sed -n 's/^V2CC_CLAUDE=//p' | tail -n 1
+    "$ZSH_BIN" -l -i -c "print -r -- \"V2CC_OUT=\$($1)\"" \
+    </dev/null 2>/dev/null | sed -n 's/^V2CC_OUT=//p' | tail -n 1
 }
+
+# What `claude` resolves to in a newly opened Terminal window.
+fresh_zsh_claude() { fresh_zsh_print 'command -v claude'; }

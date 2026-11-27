@@ -3,6 +3,10 @@
 # Build the system configuration, prove it keeps every account the running
 # system manages, then switch to it. Rolls back if activation fails.
 #
+# Run in the platform maintenance administrator account (bootstrap.sh runs
+# it). The customer account is taken from V2CC_CUSTOMER or the running
+# system, see prepare.sh.
+#
 # Safe to rerun: nothing is activated when the built configuration is
 # already the running one.
 set -euo pipefail
@@ -17,6 +21,7 @@ cd "$(dirname "$0")"
 
 use_nix_and_brew_path
 
+require_admin "切换系统配置"
 command -v nix >/dev/null 2>&1 ||
   die "未找到 Nix。请运行 ./bootstrap.sh，它会检查并安装缺失的依赖。"
 [ -x "$BREW_PREFIX/bin/brew" ] ||
@@ -50,13 +55,16 @@ else
   {
     printf 'V2CC 部署被安全检查拦截 %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     printf '部署版本：%s\n' "$(cat .v2cc-commit 2>/dev/null || printf '未知')"
-    printf '运行部署的账户：%s\n\n' "$(id -un)"
+    printf '运行部署的账户：%s\n' "$(id -un)"
+    printf '客户账户：%s\n\n' "$(sed -n 's/^[[:space:]]*customerUser = "\(.*\)";$/\1/p' machine.nix)"
     printf '当前系统：%s\n' "$current_system"
     printf '  版本信息：%s\n' "$(tr -d '\n' <"$current_system/darwin-version.json" 2>/dev/null)"
     printf '  主用户：%s\n' "$(sys_primary_user "$current_system")"
+    printf '  客户账户：%s\n' "$(sys_customer_user "$current_system")"
     printf '  Home Manager 账户：%s\n\n' "$(sys_hm_users "$current_system" | tr '\n' ' ')"
     printf '新配置：%s\n' "$new_system"
     printf '  主用户：%s\n' "$(sys_primary_user "$new_system")"
+    printf '  客户账户：%s\n' "$(sys_customer_user "$new_system")"
     printf '  Home Manager 账户：%s\n\n' "$(sys_hm_users "$new_system" | tr '\n' ' ')"
     printf '拦截原因：\n%s\n\n' "$problems"
     printf '闭包差异（nix store diff-closures）：\n'

@@ -30,7 +30,7 @@
     # so it must declare every account it manages, not only the account
     # that happens to run the deploy.
     machine = import ./machine.nix;
-    inherit (machine) primaryUser homebrewUser users;
+    inherit (machine) primaryUser homebrewUser customerUser users;
     inherit (nixpkgs) lib;
 
     homeOf = name: "/Users/${name}";
@@ -44,6 +44,7 @@
     };
   in
   assert lib.assertMsg (users != [ ]) "machine.nix: users must not be empty";
+  assert lib.assertMsg (lib.elem customerUser users) "machine.nix: customerUser must be one of users";
   {
     darwinConfigurations."v2cc-test" =
       nix-darwin.lib.darwinSystem {
@@ -62,6 +63,11 @@
             # another account deploys.
             system.primaryUser = primaryUser;
             users.users = lib.genAttrs users (name: { home = homeOf name; });
+
+            # The customer's standard account. auto-login.sh logs in only
+            # this account, and verify.sh checks Homebrew belongs to it.
+            # Readable by every account on the Mac.
+            environment.etc."v2cc/customer".text = "${customerUser}\n";
 
             # Determinate Nix manages Nix itself.
             nix.enable = false;

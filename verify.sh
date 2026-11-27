@@ -1,10 +1,16 @@
 #!/bin/bash
 #
 # Post-deploy verification. Read-only: it changes nothing and can be rerun
-# at any time. Exits non-zero if any check fails.
+# at any time, from any account. Exits non-zero if any check fails.
 #
 #   ./verify.sh                 run every check
 #   ./verify.sh --credentials   only scan for leftover GitHub credentials
+#
+# The machine-wide checks are the same from every account. What lives in
+# the customer's own account (Claude Code, brew and npm in a new Terminal
+# window) can only be seen from there, so those checks run when the
+# customer account runs this, and are only named otherwise. The credential
+# scan covers the account running it.
 set -uo pipefail
 
 cd "$(dirname "$0")" || exit 1
@@ -184,9 +190,10 @@ report_restart_state() {
     lock_agent="$(auto_login_marker lock_agent)"
     if [ -z "$lock_agent" ]; then
       note "登录后不会自动锁屏：重启后桌面处于已解锁状态。"
-    elif [ "$marker_user" != "$me" ]; then
-      # Another account's ~/Library cannot be looked into from here.
-      note "登录后立即锁屏的登录项在账户 ${marker_user} 的目录里，从当前账户无法检查。"
+    elif [ "$lock_agent" != "$LOCK_AGENT" ] && [ "$marker_user" != "$me" ]; then
+      # An earlier version put it in the customer's ~/Library, which
+      # another account cannot look into.
+      note "登录后立即锁屏的登录项在账户 ${marker_user} 的目录里（旧版本的位置），从当前账户无法检查。"
     elif [ -e "$lock_agent" ]; then
       note "登录后立即关闭显示器并锁屏的登录项已安装（是否生效、锁屏后 UU远程 能否连接，尚未在真机验证）。"
     else
@@ -215,6 +222,83 @@ report_restart_state() {
   note "上次开机：$(sysctl -n kern.boottime 2>/dev/null | sed 's/^.*} //')"
 }
 
+# The customer account as the system records it: managed, a standard
+# account, and the owner of Homebrew. Readable from every account.
+check_customer() {
+  local owner
+  info "检查客户账户..."
+  if [ -z "$customer" ]; then
+    flunk "当前系统配置没有登记客户账户（部署的是更早的版本）。请按 docs/ONBOARDING.md 第 15 节「迁移」部署新版本。"
+    return 0
+  fi
+  if sys_hm_users "$current_system" | grep -Fxq -- "$customer"; then
+    pass "客户账户 $customer 由系统配置管理"
+  else
+    flunk "客户账户 $customer 不在系统配置管理的账户中"
+  fi
+  if ! id -u -- "$customer" >/dev/null 2>&1; then
+    flunk "客户账户 $customer 在本机不存在"
+  elif is_admin "$customer"; then
+    flunk "客户账户 $customer 是管理员，应为普通账户（标准用户）"
+  else
+    pass "客户账户 $customer 是普通账户（标准用户），没有管理员权限"
+  fi
+  owner="$(stat -f '%Su' "$BREW_PREFIX" 2>/dev/null || true)"
+  if [ "$owner" = "$customer" ]; then
+    pass "Homebrew（${BREW_PREFIX}）属于客户账户 ${customer}：客户 brew install 不需要管理员密码"
+  else
+    flunk "Homebrew（${BREW_PREFIX}）属于账户「${owner:-不存在}」，不属于客户账户 ${customer}：客户不能自己 brew install"
+  fi
+}
+
+# What lives in the customer's own account, seen from that account.
+check_customer_home() {
+  local expected_home active_home resolved
+  if [ -z "$customer" ] || [ "$me" != "$customer" ]; then
+    info "客户账户里的检查（Home Manager、Claude Code、brew、npm）..."
+    note "这些只能在客户账户${customer:+ ${customer} }里检查：在那里运行 ~/v2cc-mac-setup/verify.sh。"
+    return 0
+  fi
+
+  info "检查客户账户 ${me} 的使用环境..."
+  expected_home="$(resolve_link "$(sys_hm_generation "$current_system" "$me")")"
+  active_home="$(resolve_link "$HOME/.local/state/home-manager/gcroots/current-home")"
+  if [ -n "$expected_home" ] && [ "$active_home" = "$expected_home" ]; then
+    pass "当前账户的 Home Manager 配置已生效"
+  else
+    flunk "当前账户的 Home Manager 配置未生效（期望 ${expected_home:-未知}，实际 ${active_home:-无}）"
+  fi
+
+  check "Claude Code 已安装" "$HOME/.local/bin/claude" --version
+  # Being installed is not the same as being found: test what a newly
+  # opened terminal window resolves, not an absolute path.
+  resolved="$(fresh_zsh_claude)"
+  if [ "${resolved#/}" != "$resolved" ] && [ -x "$resolved" ]; then
+    pass "新开的终端窗口能找到 claude 命令（${resolved}）"
+  else
+    flunk "新开的终端窗口找不到 claude 命令。请确认 ~/.zprofile 里有这一行：export PATH=\"\$HOME/.local/bin:\$PATH\"，并且 ~/.zshrc 没有重设 PATH。"
+  fi
+
+  resolved="$(fresh_zsh_print 'command -v brew')"
+  if [ "$resolved" = "$BREW_PREFIX/bin/brew" ]; then
+    pass "新开的终端窗口能找到 brew 命令（${resolved}）"
+  else
+    flunk "新开的终端窗口找不到 ${BREW_PREFIX}/bin/brew（找到的是「${resolved:-无}」）。请运行 ./customer-setup.sh。"
+  fi
+  # shellcheck disable=SC2016
+  resolved="$(fresh_zsh_print 'print -r -- $HOMEBREW_CASK_OPTS')"
+  if [ "$resolved" = "--appdir=$HOME/Applications" ]; then
+    pass "brew install --cask 把应用装进 ~/Applications（/Applications 只有管理员能写）"
+  else
+    flunk "新开的终端窗口里 HOMEBREW_CASK_OPTS 不是 --appdir=$HOME/Applications（当前「${resolved}」）：装应用会需要管理员密码。请运行 ./customer-setup.sh。"
+  fi
+  resolved="$(sed -n 's/^prefix[[:space:]]*=[[:space:]]*//p' "$HOME/.npmrc" 2>/dev/null | head -n 1)"
+  case "$resolved" in
+    "$HOME"/*) pass "npm install -g 装进本账户（${resolved}）" ;;
+    *) flunk "$HOME/.npmrc 没有把 npm 的安装位置设在本账户里（当前「${resolved:-未设定}」）：npm install -g 会写只读的 Nix 目录而失败。请运行 ./customer-setup.sh。" ;;
+  esac
+}
+
 finish() {
   if [ "$failures" -eq 0 ]; then
     info "验证通过。"
@@ -231,6 +315,7 @@ fi
 
 me="$(id -un)"
 current_system="$(resolve_link "$CURRENT_SYSTEM_LINK")"
+customer="$(sys_customer_user "$current_system")"
 
 info "检查基础依赖..."
 check "Xcode Command Line Tools" xcode-select -p
@@ -268,20 +353,8 @@ else
     fi
   fi
 
-  if sys_hm_users "$current_system" | grep -Fxq -- "$me"; then
-    pass "当前账户 $me 由系统配置管理"
-  else
-    flunk "当前账户 $me 不在系统配置管理的账户中"
-  fi
   pass "系统配置管理的账户：$(sys_hm_users "$current_system" | tr '\n' ' ')"
-
-  expected_home="$(resolve_link "$(sys_hm_generation "$current_system" "$me")")"
-  active_home="$(resolve_link "$HOME/.local/state/home-manager/gcroots/current-home")"
-  if [ -n "$expected_home" ] && [ "$active_home" = "$expected_home" ]; then
-    pass "当前账户的 Home Manager 配置已生效"
-  else
-    flunk "当前账户的 Home Manager 配置未生效（期望 ${expected_home:-未知}，实际 ${active_home:-无}）"
-  fi
+  check_customer
 
   check "系统命令 git" "$current_system/sw/bin/git" --version
   check "系统命令 node" "$current_system/sw/bin/node" --version
@@ -291,17 +364,7 @@ else
   check_always_on
 fi
 report_restart_state
-
-info "检查 Claude Code..."
-check "Claude Code 已安装" "$HOME/.local/bin/claude" --version
-# Being installed is not the same as being found: test what a newly opened
-# terminal window resolves, not an absolute path.
-resolved="$(fresh_zsh_claude)"
-if [ "${resolved#/}" != "$resolved" ] && [ -x "$resolved" ]; then
-  pass "新开的终端窗口能找到 claude 命令（${resolved}）"
-else
-  flunk "新开的终端窗口找不到 claude 命令。请确认 ~/.zprofile 里有这一行：export PATH=\"\$HOME/.local/bin:\$PATH\"，并且 ~/.zshrc 没有重设 PATH。"
-fi
+check_customer_home
 
 check_credentials
 finish
